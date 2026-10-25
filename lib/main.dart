@@ -1,9 +1,15 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
+import 'background.dart';
 import 'ui/downloads_tab.dart';
 import 'ui/get_tab.dart';
 
-void main() => runApp(const YtSaverApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Bg.init();
+  runApp(const YtSaverApp());
+}
 
 class YtSaverApp extends StatelessWidget {
   const YtSaverApp({super.key});
@@ -36,19 +42,21 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('YTSaver')),
-      body: IndexedStack(index: _tab, children: [
-        GetTab(onQueued: () => setState(() => _tab = 1)),
-        const DownloadsTab(),
-      ]),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _tab,
-        onDestinationSelected: (i) => setState(() => _tab = i),
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.search), label: 'Get'),
-          NavigationDestination(icon: Icon(Icons.download), label: 'Downloads'),
-        ],
+    return WithForegroundTask(
+      child: Scaffold(
+        appBar: AppBar(title: const Text('YTSaver')),
+        body: IndexedStack(index: _tab, children: [
+          GetTab(onQueued: () => setState(() => _tab = 1)),
+          const DownloadsTab(),
+        ]),
+        bottomNavigationBar: NavigationBar(
+          selectedIndex: _tab,
+          onDestinationSelected: (i) => setState(() => _tab = i),
+          destinations: const [
+            NavigationDestination(icon: Icon(Icons.search), label: 'Get'),
+            NavigationDestination(icon: Icon(Icons.download), label: 'Downloads'),
+          ],
+        ),
       ),
     );
   }

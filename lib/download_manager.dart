@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
+import 'background.dart';
 import 'models.dart';
 
 class VideoInfo {
@@ -87,6 +88,7 @@ class DownloadManager extends ChangeNotifier {
   Future<void> _run(DownloadTask t, DownloadRequest r) async {
     final temp = <File>[];
     try {
+      await Bg.start();
       final tmp = await getTemporaryDirectory();
       final streams = <StreamInfo>[
         if (r.videoStream != null) r.videoStream!,
@@ -121,6 +123,7 @@ class DownloadManager extends ChangeNotifier {
               lastBytes = t.received;
               t.progress = t.total == 0 ? 0 : t.received / t.total;
               t.touch();
+              syncNotification();
             }
           }
         } finally {
@@ -151,6 +154,7 @@ class DownloadManager extends ChangeNotifier {
         t.state = TaskState.merging;
         t.log('Merging with ffmpeg -> $ext');
         t.touch();
+        syncNotification(force: true);
         await _merge(t, temp[0], temp[1], out, r.video.duration);
       } else {
         await temp.first.copy(out);
@@ -172,7 +176,36 @@ class DownloadManager extends ChangeNotifier {
         } catch (_) {}
       }
       t.touch();
+      if (t.state == TaskState.done) {
+        await Bg.notify('Download complete', t.title);
+      } else if (t.state == TaskState.failed) {
+        await Bg.notify('Download failed', t.title);
+      }
+      syncNotification(force: true);
     }
+  }
+
+  DateTime _lastSync = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// Updates the ongoing notification, or stops the service when idle.
+  void syncNotification({bool force = false}) {
+    final now = DateTime.now();
+    if (!force && now.difference(_lastSync).inMilliseconds < 1000) return;
+    _lastSync = now;
+    final active = tasks.where((x) => x.active).toList();
+    if (active.isEmpty) {
+      Bg.stop();
+      return;
+    }
+    final first = active.first;
+    final pct = (first.progress * 100).round();
+    final text = first.state == TaskState.merging
+        ? 'Merging video + audio…'
+        : '$pct% · ${fmtBytes(first.speed)}/s';
+    Bg.update(
+      active.length > 1 ? '${active.length} downloads' : first.title,
+      active.length > 1 ? 'Working in the background…' : text,
+    );
   }
 
   Future<void> _merge(
@@ -193,12 +226,6 @@ class DownloadManager extends ChangeNotifier {
       (log) {
         final m = log.getMessage().trim();
         if (m.isNotEmpty) t.log(m);
-      },
-      (stats) {
-        if (dur != null && dur.inMilliseconds > 0) {
-          t.progress = (stats.getTime() / dur.inMilliseconds).clamp(0.0, 1.0);
-          t.touch();
-        }
       },
     );
     return c.future;

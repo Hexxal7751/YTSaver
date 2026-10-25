@@ -75,10 +75,32 @@ class _TaskCard extends StatelessWidget {
               const SizedBox(height: 8),
               if (task.active)
                 LinearProgressIndicator(
-                  value: task.state == TaskState.queued ? null : task.progress,
+                  value: (task.state == TaskState.queued ||
+                          task.state == TaskState.merging)
+                      ? null
+                      : task.progress,
                 ),
               const SizedBox(height: 6),
-              Text(_status(task), style: Theme.of(context).textTheme.bodySmall),
+              Row(children: [
+                if (task.state == TaskState.merging)
+                  const Padding(
+                    padding: EdgeInsets.only(right: 8),
+                    child: SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  ),
+                if (task.state == TaskState.done)
+                  const Padding(
+                    padding: EdgeInsets.only(right: 6),
+                    child: Icon(Icons.check_circle, size: 16, color: Colors.green),
+                  ),
+                Expanded(
+                  child: Text(_status(task),
+                      style: Theme.of(context).textTheme.bodySmall),
+                ),
+              ]),
               ExpansionTile(
                 tilePadding: EdgeInsets.zero,
                 title: Text('Verbose log (${task.logs.length})',
