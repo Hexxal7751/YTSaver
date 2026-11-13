@@ -41,7 +41,7 @@ class Bg {
       ),
     );
     await _notif.initialize(const InitializationSettings(
-      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+      android: AndroidInitializationSettings('ic_stat_ytsaver'),
     ));
     await FlutterForegroundTask.requestNotificationPermission();
     _ready = true;
@@ -93,6 +93,7 @@ class Bg {
             channelDescription: 'Tells you when a download finishes.',
             importance: Importance.high,
             priority: Priority.high,
+            icon: 'ic_stat_ytsaver',
           ),
         ),
       );

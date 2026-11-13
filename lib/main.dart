@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
 import 'background.dart';
+import 'open_helper.dart';
 import 'ui/downloads_tab.dart';
 import 'ui/get_tab.dart';
+
+const _seed = Color(0xFF6B2FF5);
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -20,9 +23,9 @@ class YtSaverApp extends StatelessWidget {
       title: 'YTSaver',
       debugShowCheckedModeBanner: false,
       themeMode: ThemeMode.system,
-      theme: ThemeData(colorSchemeSeed: Colors.red, useMaterial3: true),
+      theme: ThemeData(colorSchemeSeed: _seed, useMaterial3: true),
       darkTheme: ThemeData(
-        colorSchemeSeed: Colors.red,
+        colorSchemeSeed: _seed,
         brightness: Brightness.dark,
         useMaterial3: true,
       ),
@@ -44,7 +47,20 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     return WithForegroundTask(
       child: Scaffold(
-        appBar: AppBar(title: const Text('YTSaver')),
+        appBar: AppBar(
+          title: Row(children: [
+            Image.asset('assets/logo.png', height: 32),
+            const SizedBox(width: 10),
+            const Text('YTSaver'),
+          ]),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.folder_open),
+              tooltip: 'Open save folder',
+              onPressed: () => openFolderWithFeedback(context, videoDir),
+            ),
+          ],
+        ),
         body: IndexedStack(index: _tab, children: [
           GetTab(onQueued: () => setState(() => _tab = 1)),
           const DownloadsTab(),

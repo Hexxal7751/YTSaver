@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
 import '../download_manager.dart';
+import '../links.dart';
 import '../models.dart';
 
 enum Mode { both, videoOnly, audioOnly }
@@ -23,6 +24,7 @@ class _GetTabState extends State<GetTab> {
   AudioOnlyStreamInfo? _a;
   Mode _mode = Mode.both;
   bool _loading = false;
+  bool _isShort = false;
   String? _error;
 
   Future<void> _paste() async {
@@ -41,9 +43,10 @@ class _GetTabState extends State<GetTab> {
       _loading = true;
       _error = null;
       _info = null;
+      _isShort = url.contains('/shorts/');
     });
     try {
-      final info = await manager.fetch(url);
+      final info = await manager.fetch(normalizeYoutubeInput(url));
       final vs = [...info.manifest.videoOnly]..sort((x, y) {
           final h = y.videoResolution.height.compareTo(x.videoResolution.height);
           if (h != 0) return h;
@@ -92,7 +95,7 @@ class _GetTabState extends State<GetTab> {
         TextField(
           controller: _ctrl,
           decoration: InputDecoration(
-            labelText: 'Video link',
+            labelText: 'YouTube or Shorts link',
             border: const OutlineInputBorder(),
             suffixIcon: IconButton(
                 icon: const Icon(Icons.paste), onPressed: _paste),
@@ -105,14 +108,26 @@ class _GetTabState extends State<GetTab> {
           icon: const Icon(Icons.search),
           label: Text(_loading ? 'Loading…' : 'Fetch formats'),
         ),
-        if (_loading) const Padding(
-          padding: EdgeInsets.only(top: 16),
-          child: LinearProgressIndicator(),
-        ),
+        if (_loading)
+          const Padding(
+            padding: EdgeInsets.only(top: 16),
+            child: LinearProgressIndicator(),
+          ),
         if (_error != null)
           Padding(
             padding: const EdgeInsets.only(top: 16),
             child: Text(_error!, style: TextStyle(color: cs.error)),
+          ),
+        if (_info == null && !_loading && _error == null)
+          Padding(
+            padding: const EdgeInsets.only(top: 48),
+            child: Column(children: [
+              Image.asset('assets/logo.png', height: 150),
+              const SizedBox(height: 12),
+              Text('Paste a YouTube video or Shorts link',
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodyMedium),
+            ]),
           ),
         if (_info != null) ..._details(cs),
       ],
@@ -134,7 +149,8 @@ class _GetTabState extends State<GetTab> {
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text(v.title, style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 4),
-              Text('${v.author} · ${v.duration == null ? 'live' : fmtDuration(v.duration!)}'),
+              Text('${_isShort ? 'Shorts · ' : ''}${v.author} · '
+                  '${v.duration == null ? 'live' : fmtDuration(v.duration!)}'),
             ]),
           ),
         ]),

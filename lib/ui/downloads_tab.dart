@@ -1,7 +1,10 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 
 import '../download_manager.dart';
 import '../models.dart';
+import '../open_helper.dart';
 
 class DownloadsTab extends StatelessWidget {
   const DownloadsTab({super.key});
@@ -12,7 +15,13 @@ class DownloadsTab extends StatelessWidget {
       listenable: manager,
       builder: (context, _) {
         if (manager.tasks.isEmpty) {
-          return const Center(child: Text('No downloads yet'));
+          return Center(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Image.asset('assets/logo.png', height: 120),
+              const SizedBox(height: 12),
+              const Text('No downloads yet'),
+            ]),
+          );
         }
         return ListView.builder(
           padding: const EdgeInsets.all(12),
@@ -105,6 +114,16 @@ class _TaskCard extends StatelessWidget {
                       style: Theme.of(context).textTheme.bodySmall),
                 ),
               ]),
+              if (task.state == TaskState.done && task.outputPath != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: OutlinedButton.icon(
+                    onPressed: () => openFolderWithFeedback(
+                        context, File(task.outputPath!).parent.path),
+                    icon: const Icon(Icons.folder_open),
+                    label: const Text('Open folder'),
+                  ),
+                ),
               ExpansionTile(
                 tilePadding: EdgeInsets.zero,
                 title: Text('Verbose log (${task.logs.length})',

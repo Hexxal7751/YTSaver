@@ -24,6 +24,43 @@ jobs:
           flutter create . --platforms=android --org dev.ytsaver --project-name ytsaver
           rm -rf lib test && cp -r /tmp/lib lib && cp /tmp/pubspec.yaml pubspec.yaml
 
+      - name: Generate app icons from assets/logo.png
+        run: |
+          set -e
+          test -f assets/logo.png || { echo "ERROR: assets/logo.png is missing"; exit 1; }
+          command -v convert >/dev/null || sudo apt-get install -y imagemagick
+          R=android/app/src/main/res
+          make_icons() {
+            d=$1; s=$2
+            mkdir -p $R/mipmap-$d $R/drawable-$d
+            fg=$((s*108/48)); inner=$((fg*62/100)); leg=$((s*92/100)); n=$((s/2))
+            # adaptive icon foreground (logo kept inside the safe zone)
+            convert assets/logo.png -trim +repage -resize ${inner}x${inner} -background none -gravity center -extent ${fg}x${fg} $R/mipmap-$d/ic_launcher_foreground.png
+            # legacy launcher icon
+            convert assets/logo.png -trim +repage -resize ${leg}x${leg} -background none -gravity center -extent ${s}x${s} $R/mipmap-$d/ic_launcher.png
+            # white silhouette for notifications
+            convert assets/logo.png -trim +repage -resize ${n}x${n} -background none -gravity center -extent ${n}x${n} -fill white -colorize 100 $R/drawable-$d/ic_stat_ytsaver.png
+          }
+          make_icons mdpi 48
+          make_icons hdpi 72
+          make_icons xhdpi 96
+          make_icons xxhdpi 144
+          make_icons xxxhdpi 192
+          mkdir -p $R/mipmap-anydpi-v26 $R/values
+          cat > $R/mipmap-anydpi-v26/ic_launcher.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+            <background android:drawable="@color/ic_launcher_background"/>
+            <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
+          </adaptive-icon>
+          XML
+          cat > $R/values/ic_launcher_background.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+            <color name="ic_launcher_background">#FFFFFF</color>
+          </resources>
+          XML
+
       - name: Patch manifest, minSdk, desugaring
         run: |
           M=android/app/src/main/AndroidManifest.xml
