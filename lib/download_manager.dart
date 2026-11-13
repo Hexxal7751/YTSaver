@@ -23,6 +23,14 @@ class DownloadRequest {
   final AudioOnlyStreamInfo? audioStream;
 }
 
+/// Error with a human-readable message (shown directly in the UI).
+class FetchError implements Exception {
+  FetchError(this.message);
+  final String message;
+  @override
+  String toString() => message;
+}
+
 class _Cancelled implements Exception {}
 
 String describeVideo(VideoOnlyStreamInfo s) =>
@@ -50,10 +58,26 @@ class DownloadManager extends ChangeNotifier {
   final List<DownloadTask> tasks = [];
   final YoutubeExplode _yt = YoutubeExplode();
 
-  Future<VideoInfo> fetch(String url) async {
-    final video = await _yt.videos.get(url);
-    final manifest = await _yt.videos.streams.getManifest(video.id);
-    return VideoInfo(video, manifest);
+  Future<VideoInfo> fetch(String input) async {
+    // Links never contain whitespace; pasted text sometimes does.
+    final url = input.replaceAll(RegExp(r'\s'), '');
+    try {
+      final video = await _yt.videos.get(url);
+      final manifest = await _yt.videos.streams.getManifest(video.id);
+      return VideoInfo(video, manifest);
+    } on RequestLimitExceededException {
+      throw FetchError(
+          'YouTube is rate-limiting this connection (too many requests from '
+          'this IP address).\n\nWait 30-60 minutes, or switch between Wi-Fi '
+          'and mobile data (toggling airplane mode also helps) to get a new '
+          'IP, then try again.');
+    } on ArgumentError {
+      throw FetchError('That does not look like a valid YouTube link.');
+    } on YoutubeExplodeException catch (e) {
+      final msg = '$e';
+      throw FetchError(
+          'YouTube error: ${msg.length > 300 ? msg.substring(0, 300) : msg}');
+    }
   }
 
   void enqueue(DownloadRequest r) {
