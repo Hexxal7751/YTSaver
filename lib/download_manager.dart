@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:ffmpeg_kit_flutter_minimal/ffmpeg_kit.dart';
-import 'package:ffmpeg_kit_flutter_minimal/return_code.dart';
+import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new_min/return_code.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
@@ -86,7 +86,8 @@ class DownloadManager extends ChangeNotifier {
       s.replaceAll(RegExp(r'[\\/:*?"<>|\n\r]'), '_').trim();
 
   Future<void> _run(DownloadTask t, DownloadRequest r) async {
-    final temp = <File>[];
+    final temp = <File>[]; // downloaded streams
+    final extra = <File>[]; // merged temp output
     try {
       await Bg.start();
       final tmp = await getTemporaryDirectory();
@@ -155,13 +156,36 @@ class DownloadManager extends ChangeNotifier {
         t.log('Merging with ffmpeg -> $ext');
         t.touch();
         syncNotification(force: true);
-        await _merge(t, temp[0], temp[1], out, r.video.duration);
+
+        // Merge inside the app's private cache, then copy to public storage.
+        final merged = File('${tmp.path}/$id-merged.$ext');
+        extra.add(merged);
+        try {
+          await _merge(t, temp[0], temp[1], merged.path);
+          t.log('Copying merged file to $out');
+          await merged.copy(out);
+          t.outputPath = out;
+        } on _Cancelled {
+          rethrow;
+        } catch (e) {
+          t.log('Merge failed: $e');
+          t.log('Saving video and audio as separate files instead…');
+          final vExt = r.videoStream!.container.name;
+          final aExt = r.audioStream!.container.name == 'mp4' ? 'm4a' : 'webm';
+          final vOut = '${dir.path}/$name [${t.label}] video.$vExt';
+          final aOut = '${dir.path}/$name [${t.label}] audio.$aExt';
+          await temp[0].copy(vOut);
+          await temp[1].copy(aOut);
+          t.outputPath = vOut;
+          t.note = 'Merge failed, so video and audio were saved separately '
+              'in ${dir.path}';
+        }
       } else {
         await temp.first.copy(out);
+        t.outputPath = out;
       }
-      t.outputPath = out;
       t.state = TaskState.done;
-      t.log('Saved: $out');
+      t.log('Saved: ${t.outputPath}');
     } on _Cancelled {
       t.state = TaskState.cancelled;
       t.log('Cancelled');
@@ -170,7 +194,7 @@ class DownloadManager extends ChangeNotifier {
       t.error = '$e';
       t.log('ERROR: $e');
     } finally {
-      for (final f in temp) {
+      for (final f in [...temp, ...extra]) {
         try {
           if (await f.exists()) await f.delete();
         } catch (_) {}
@@ -208,27 +232,67 @@ class DownloadManager extends ChangeNotifier {
     );
   }
 
-  Future<void> _merge(
-      DownloadTask t, File v, File a, String out, Duration? dur) {
+  /// Runs ffmpeg with a watchdog: aborts if there is no log/stat output and
+  /// the output file stops growing for 90 seconds, or if the user cancels.
+  Future<void> _merge(DownloadTask t, File v, File a, String outPath) async {
     final c = Completer<void>();
-    final cmd =
-        '-y -i "${v.path}" -i "${a.path}" -map 0:v:0 -map 1:a:0 -c copy "$out"';
-    FFmpegKit.executeAsync(
-      cmd,
-      (session) async {
-        final rc = await session.getReturnCode();
-        if (ReturnCode.isSuccess(rc)) {
-          c.complete();
-        } else {
-          c.completeError('ffmpeg failed (code ${rc?.getValue()})');
+    var lastActivity = DateTime.now();
+    var lastLen = -1;
+    final cmd = '-y -nostdin -i "${v.path}" -i "${a.path}" '
+        '-map 0:v:0 -map 1:a:0 -c copy "$outPath"';
+    t.log('ffmpeg $cmd');
+
+    final watchdog = Timer.periodic(const Duration(seconds: 3), (_) async {
+      if (c.isCompleted) return;
+      if (t.cancelRequested) {
+        FFmpegKit.cancel();
+        if (!c.isCompleted) c.completeError(_Cancelled());
+        return;
+      }
+      try {
+        final f = File(outPath);
+        if (await f.exists()) {
+          final len = await f.length();
+          if (len != lastLen) {
+            lastLen = len;
+            lastActivity = DateTime.now();
+          }
         }
-      },
-      (log) {
-        final m = log.getMessage().trim();
-        if (m.isNotEmpty) t.log(m);
-      },
-    );
-    return c.future;
+      } catch (_) {}
+      if (DateTime.now().difference(lastActivity).inSeconds > 90) {
+        t.log('ffmpeg showed no activity for 90s - aborting');
+        FFmpegKit.cancel();
+        if (!c.isCompleted) {
+          c.completeError('ffmpeg stalled (no activity for 90s)');
+        }
+      }
+    });
+
+    try {
+      await FFmpegKit.executeAsync(
+        cmd,
+        (session) async {
+          final rc = await session.getReturnCode();
+          if (c.isCompleted) return;
+          if (ReturnCode.isSuccess(rc)) {
+            c.complete();
+          } else {
+            c.completeError('ffmpeg failed (code ${rc?.getValue()})');
+          }
+        },
+        (log) {
+          lastActivity = DateTime.now();
+          final m = log.getMessage().trim();
+          if (m.isNotEmpty) t.log(m);
+        },
+        (stats) {
+          lastActivity = DateTime.now();
+        },
+      );
+      await c.future;
+    } finally {
+      watchdog.cancel();
+    }
   }
 }
 

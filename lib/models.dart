@@ -14,6 +14,7 @@ class DownloadTask extends ChangeNotifier {
   double speed = 0; // bytes per second
   String? outputPath;
   String? error;
+  String? note; // extra message shown when done (e.g. merge fallback)
   bool cancelRequested = false;
   final List<String> logs = [];
 

@@ -39,7 +39,7 @@ class _TaskCard extends StatelessWidget {
       case TaskState.merging:
         return 'Merging video + audio…';
       case TaskState.done:
-        return 'Saved to ${t.outputPath}';
+        return t.note ?? 'Saved to ${t.outputPath}';
       case TaskState.failed:
         return 'Failed: ${t.error}';
       case TaskState.cancelled:
@@ -92,9 +92,13 @@ class _TaskCard extends StatelessWidget {
                     ),
                   ),
                 if (task.state == TaskState.done)
-                  const Padding(
-                    padding: EdgeInsets.only(right: 6),
-                    child: Icon(Icons.check_circle, size: 16, color: Colors.green),
+                  Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: Icon(
+                      task.note == null ? Icons.check_circle : Icons.warning_amber,
+                      size: 16,
+                      color: task.note == null ? Colors.green : Colors.orange,
+                    ),
                   ),
                 Expanded(
                   child: Text(_status(task),
