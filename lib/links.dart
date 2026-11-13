@@ -1,5 +1,8 @@
 final _idRe = RegExp(r'^[A-Za-z0-9_-]{11}$');
 
+bool looksLikeYoutube(String s) =>
+    RegExp(r'(youtube\.com|youtu\.be)/', caseSensitive: false).hasMatch(s);
+
 /// Turns any YouTube link (watch, youtu.be, shorts, live, embed, mobile,
 /// music) or a bare video ID into a plain video ID.
 String normalizeYoutubeInput(String input) {

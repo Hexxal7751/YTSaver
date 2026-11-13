@@ -3,10 +3,29 @@ import 'package:flutter/foundation.dart';
 enum TaskState { queued, downloading, merging, done, failed, cancelled }
 
 class DownloadTask extends ChangeNotifier {
-  DownloadTask({required this.title, required this.label});
+  DownloadTask({
+    required this.title,
+    required this.label,
+    this.videoId = '',
+    this.thumbnailUrl,
+    this.channel,
+    this.videoDuration,
+    this.audioOnly = false,
+    String? id,
+    DateTime? createdAt,
+  })  : id = id ?? DateTime.now().microsecondsSinceEpoch.toString(),
+        createdAt = createdAt ?? DateTime.now();
 
+  final String id;
   final String title;
   final String label;
+  final String videoId;
+  final String? thumbnailUrl;
+  final String? channel;
+  final Duration? videoDuration;
+  final bool audioOnly;
+  final DateTime createdAt;
+
   TaskState state = TaskState.queued;
   double progress = 0;
   int received = 0;
@@ -14,8 +33,10 @@ class DownloadTask extends ChangeNotifier {
   double speed = 0; // bytes per second
   String? outputPath;
   String? error;
-  String? note; // extra message shown when done (e.g. merge fallback)
+  String? note; // extra message when done (e.g. merge fallback)
+  int? fileBytes;
   bool cancelRequested = false;
+  Object? retryPayload; // the DownloadRequest, used by "Retry"
   final List<String> logs = [];
 
   Duration? get eta {
@@ -37,7 +58,46 @@ class DownloadTask extends ChangeNotifier {
   }
 
   void touch() => notifyListeners();
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'label': label,
+        'videoId': videoId,
+        'thumb': thumbnailUrl,
+        'channel': channel,
+        'durationMs': videoDuration?.inMilliseconds,
+        'audio': audioOnly,
+        'created': createdAt.millisecondsSinceEpoch,
+        'path': outputPath,
+        'note': note,
+        'bytes': fileBytes,
+      };
+
+  factory DownloadTask.fromJson(Map<String, dynamic> j) {
+    final ms = j['durationMs'] as int?;
+    final t = DownloadTask(
+      id: j['id'] as String?,
+      title: (j['title'] as String?) ?? '',
+      label: (j['label'] as String?) ?? '',
+      videoId: (j['videoId'] as String?) ?? '',
+      thumbnailUrl: j['thumb'] as String?,
+      channel: j['channel'] as String?,
+      videoDuration: ms == null ? null : Duration(milliseconds: ms),
+      audioOnly: (j['audio'] as bool?) ?? false,
+      createdAt:
+          DateTime.fromMillisecondsSinceEpoch((j['created'] as int?) ?? 0),
+    );
+    t.state = TaskState.done;
+    t.progress = 1;
+    t.outputPath = j['path'] as String?;
+    t.note = j['note'] as String?;
+    t.fileBytes = j['bytes'] as int?;
+    return t;
+  }
 }
+
+String _two(int n) => n.toString().padLeft(2, '0');
 
 String fmtBytes(num b) {
   const u = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -51,9 +111,32 @@ String fmtBytes(num b) {
 }
 
 String fmtDuration(Duration d) {
-  String two(int n) => n.toString().padLeft(2, '0');
   final h = d.inHours;
   return h > 0
-      ? '$h:${two(d.inMinutes % 60)}:${two(d.inSeconds % 60)}'
-      : '${d.inMinutes}:${two(d.inSeconds % 60)}';
+      ? '$h:${_two(d.inMinutes % 60)}:${_two(d.inSeconds % 60)}'
+      : '${d.inMinutes}:${_two(d.inSeconds % 60)}';
+}
+
+String fmtCount(int n) {
+  if (n >= 1000000000) return '${(n / 1e9).toStringAsFixed(1)}B';
+  if (n >= 1000000) return '${(n / 1e6).toStringAsFixed(1)}M';
+  if (n >= 1000) return '${(n / 1e3).toStringAsFixed(1)}K';
+  return '$n';
+}
+
+String fmtDate(DateTime d) {
+  const m = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+  ];
+  return '${d.day} ${m[d.month - 1]} ${d.year}';
+}
+
+String timeAgo(DateTime d) {
+  final s = DateTime.now().difference(d);
+  if (s.inMinutes < 1) return 'just now';
+  if (s.inMinutes < 60) return '${s.inMinutes} min ago';
+  if (s.inHours < 24) return '${s.inHours} h ago';
+  if (s.inDays < 30) return '${s.inDays} d ago';
+  return '${d.year}-${_two(d.month)}-${_two(d.day)}';
 }

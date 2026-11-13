@@ -1,14 +1,17 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new_min/return_code.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
 import 'background.dart';
 import 'models.dart';
+import 'settings.dart';
 
 class VideoInfo {
   VideoInfo(this.video, this.manifest);
@@ -33,30 +36,101 @@ class FetchError implements Exception {
 
 class _Cancelled implements Exception {}
 
-String describeVideo(VideoOnlyStreamInfo s) =>
-    '${s.qualityLabel} · ${_vcodec(s.videoCodec)} · ${s.container.name} · '
-    '${fmtBytes(s.size.totalBytes)}';
-
-String describeAudio(AudioOnlyStreamInfo s) =>
-    '${_acodec(s.audioCodec)} · ${s.bitrate.kiloBitsPerSecond.round()} kbps · '
-    '${s.container.name} · ${fmtBytes(s.size.totalBytes)}';
-
-String _vcodec(String c) {
+String vcodecName(String c) {
   if (c.startsWith('avc')) return 'H.264';
   if (c.startsWith('vp09') || c.startsWith('vp9')) return 'VP9';
   if (c.startsWith('av01')) return 'AV1';
   return c;
 }
 
-String _acodec(String c) {
+String acodecName(String c) {
   if (c.startsWith('mp4a')) return 'AAC';
   if (c.contains('opus')) return 'Opus';
   return c;
 }
 
+String describeVideo(VideoOnlyStreamInfo s) =>
+    '${s.qualityLabel} · ${vcodecName(s.videoCodec)} · ${s.container.name} · '
+    '${fmtBytes(s.size.totalBytes)}';
+
+String describeAudio(AudioOnlyStreamInfo s) =>
+    '${acodecName(s.audioCodec)} · ${s.bitrate.kiloBitsPerSecond.round()} kbps · '
+    '${s.container.name} · ${fmtBytes(s.size.totalBytes)}';
+
 class DownloadManager extends ChangeNotifier {
   final List<DownloadTask> tasks = [];
   final YoutubeExplode _yt = YoutubeExplode();
+
+  // ---------- history (saved on disk) ----------
+
+  Future<void>? _histLoad;
+  Future<void> loadHistory() => _histLoad ??= _loadHistory();
+
+  Future<File> _historyFile() async =>
+      File('${(await getApplicationDocumentsDirectory()).path}/history.json');
+
+  Future<void> _loadHistory() async {
+    try {
+      final f = await _historyFile();
+      if (!await f.exists()) return;
+      final list = jsonDecode(await f.readAsString()) as List<dynamic>;
+      for (final e in list) {
+        final t = DownloadTask.fromJson(e as Map<String, dynamic>);
+        final p = t.outputPath;
+        if (p != null && await File(p).exists()) tasks.add(t);
+      }
+      tasks.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  Future<void> _saveHistory() async {
+    try {
+      await loadHistory();
+      final done = tasks
+          .where((t) => t.state == TaskState.done)
+          .take(200)
+          .map((t) => t.toJson())
+          .toList();
+      await (await _historyFile()).writeAsString(jsonEncode(done));
+    } catch (_) {}
+  }
+
+  // ---------- list management ----------
+
+  void remove(DownloadTask t) {
+    if (t.active) t.cancelRequested = true;
+    tasks.remove(t);
+    notifyListeners();
+    _saveHistory();
+  }
+
+  void clearFinished() {
+    tasks.removeWhere((t) => !t.active);
+    notifyListeners();
+    _saveHistory();
+  }
+
+  Future<void> deleteWithFile(DownloadTask t) async {
+    try {
+      final p = t.outputPath;
+      if (p != null) {
+        final f = File(p);
+        if (await f.exists()) await f.delete();
+      }
+    } catch (_) {}
+    remove(t);
+  }
+
+  void retry(DownloadTask t) {
+    final r = t.retryPayload;
+    if (r is DownloadRequest) {
+      tasks.remove(t);
+      enqueue(r);
+    }
+  }
+
+  // ---------- fetching ----------
 
   Future<VideoInfo> fetch(String input) async {
     // Links never contain whitespace; pasted text sometimes does.
@@ -80,13 +154,24 @@ class DownloadManager extends ChangeNotifier {
     }
   }
 
+  // ---------- downloading ----------
+
   void enqueue(DownloadRequest r) {
     final label = [
       if (r.videoStream != null) r.videoStream!.qualityLabel,
       if (r.audioStream != null)
         '${r.audioStream!.bitrate.kiloBitsPerSecond.round()}kbps',
     ].join(' + ');
-    final t = DownloadTask(title: r.video.title, label: label);
+    final t = DownloadTask(
+      title: r.video.title,
+      label: label,
+      videoId: r.video.id.value,
+      thumbnailUrl: r.video.thumbnails.mediumResUrl,
+      channel: r.video.author,
+      videoDuration: r.video.duration,
+      audioOnly: r.videoStream == null,
+    );
+    t.retryPayload = r;
     tasks.insert(0, t);
     notifyListeners();
     _run(t, r);
@@ -121,6 +206,7 @@ class DownloadManager extends ChangeNotifier {
       ];
       t.total = streams.fold(0, (s, e) => s + e.size.totalBytes);
       t.state = TaskState.downloading;
+      notifyListeners();
       t.log('Total to download: ${fmtBytes(t.total)}');
 
       var lastTick = DateTime.now();
@@ -178,7 +264,7 @@ class DownloadManager extends ChangeNotifier {
       if (temp.length == 2) {
         t.state = TaskState.merging;
         t.log('Merging with ffmpeg -> $ext');
-        t.touch();
+        notifyListeners();
         syncNotification(force: true);
 
         // Merge inside the app's private cache, then copy to public storage.
@@ -208,6 +294,9 @@ class DownloadManager extends ChangeNotifier {
         await temp.first.copy(out);
         t.outputPath = out;
       }
+      try {
+        t.fileBytes = await File(t.outputPath!).length();
+      } catch (_) {}
       t.state = TaskState.done;
       t.log('Saved: ${t.outputPath}');
     } on _Cancelled {
@@ -224,9 +313,13 @@ class DownloadManager extends ChangeNotifier {
         } catch (_) {}
       }
       t.touch();
+      notifyListeners();
       if (t.state == TaskState.done) {
+        _saveHistory();
+        if (settings.haptics) HapticFeedback.mediumImpact();
         await Bg.notify('Download complete', t.title);
       } else if (t.state == TaskState.failed) {
+        if (settings.haptics) HapticFeedback.heavyImpact();
         await Bg.notify('Download failed', t.title);
       }
       syncNotification(force: true);
