@@ -46,7 +46,7 @@ jobs:
           make_icons xhdpi 96
           make_icons xxhdpi 144
           make_icons xxxhdpi 192
-          mkdir -p $R/mipmap-anydpi-v26 $R/values
+          mkdir -p $R/mipmap-anydpi-v26 $R/values $R/raw
           cat > $R/mipmap-anydpi-v26/ic_launcher.xml <<'XML'
           <?xml version="1.0" encoding="utf-8"?>
           <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
@@ -59,6 +59,12 @@ jobs:
           <resources>
             <color name="ic_launcher_background">#FFFFFF</color>
           </resources>
+          XML
+          # stop release builds from stripping icons that are looked up by name
+          cat > $R/raw/keep.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources xmlns:tools="http://schemas.android.com/tools"
+              tools:keep="@drawable/ic_stat_ytsaver,@mipmap/ic_launcher,@mipmap/ic_launcher_foreground" />
           XML
 
       - name: Patch manifest, minSdk, desugaring, lint

@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
@@ -21,35 +22,59 @@ class _KeepAliveHandler extends TaskHandler {
 
 class Bg {
   static final _notif = FlutterLocalNotificationsPlugin();
-  static bool _ready = false;
+  static Future<void>? _initFuture;
   static int _nextId = 100;
 
-  static Future<void> init() async {
-    FlutterForegroundTask.init(
-      androidNotificationOptions: AndroidNotificationOptions(
-        channelId: 'ytsaver_progress',
-        channelName: 'Download progress',
-        channelDescription: 'Shown while downloads are running.',
-        channelImportance: NotificationChannelImportance.LOW,
-        priority: NotificationPriority.LOW,
-      ),
-      iosNotificationOptions: const IOSNotificationOptions(),
-      foregroundTaskOptions: ForegroundTaskOptions(
-        eventAction: ForegroundTaskEventAction.nothing(),
-        allowWakeLock: true,
-        allowWifiLock: true,
-      ),
-    );
-    await _notif.initialize(const InitializationSettings(
-      android: AndroidInitializationSettings('ic_stat_ytsaver'),
-    ));
-    await FlutterForegroundTask.requestNotificationPermission();
-    _ready = true;
+  /// Set when something in the setup failed (shown as a banner in the UI).
+  static final ValueNotifier<String?> initError = ValueNotifier<String?>(null);
+
+  /// Safe to call many times; the setup runs only once and never throws.
+  static Future<void> init() => _initFuture ??= _init();
+
+  static Future<void> _init() async {
+    try {
+      FlutterForegroundTask.init(
+        androidNotificationOptions: AndroidNotificationOptions(
+          channelId: 'ytsaver_progress',
+          channelName: 'Download progress',
+          channelDescription: 'Shown while downloads are running.',
+          channelImportance: NotificationChannelImportance.LOW,
+          priority: NotificationPriority.LOW,
+        ),
+        iosNotificationOptions: const IOSNotificationOptions(),
+        foregroundTaskOptions: ForegroundTaskOptions(
+          eventAction: ForegroundTaskEventAction.nothing(),
+          allowWakeLock: true,
+          allowWifiLock: true,
+        ),
+      );
+    } catch (e) {
+      initError.value = 'service: $e';
+    }
+
+    try {
+      await _notif.initialize(const InitializationSettings(
+        android: AndroidInitializationSettings('ic_stat_ytsaver'),
+      ));
+    } catch (_) {
+      // Fall back to the launcher icon if the custom icon is unavailable.
+      try {
+        await _notif.initialize(const InitializationSettings(
+          android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+        ));
+      } catch (e) {
+        initError.value = 'notifications: $e';
+      }
+    }
+
+    try {
+      await FlutterForegroundTask.requestNotificationPermission();
+    } catch (_) {}
   }
 
   static Future<void> start() async {
     try {
-      if (!_ready) await init();
+      await init();
       if (await FlutterForegroundTask.isRunningService) return;
       await FlutterForegroundTask.startService(
         serviceId: 7001,
@@ -82,6 +107,7 @@ class Bg {
   /// Normal (non-ongoing) push notification for finished/failed downloads.
   static Future<void> notify(String title, String body) async {
     try {
+      await init();
       await _notif.show(
         _nextId++,
         title,
@@ -93,7 +119,6 @@ class Bg {
             channelDescription: 'Tells you when a download finishes.',
             importance: Importance.high,
             priority: Priority.high,
-            icon: 'ic_stat_ytsaver',
           ),
         ),
       );

@@ -8,10 +8,11 @@ import 'ui/get_tab.dart';
 
 const _seed = Color(0xFF6B2FF5);
 
-Future<void> main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  await Bg.init();
   runApp(const YtSaverApp());
+  // Start notification/service setup AFTER the UI is up; it never throws.
+  Bg.init();
 }
 
 class YtSaverApp extends StatelessWidget {
@@ -61,9 +62,26 @@ class _HomePageState extends State<HomePage> {
             ),
           ],
         ),
-        body: IndexedStack(index: _tab, children: [
-          GetTab(onQueued: () => setState(() => _tab = 1)),
-          const DownloadsTab(),
+        body: Column(children: [
+          ValueListenableBuilder<String?>(
+            valueListenable: Bg.initError,
+            builder: (context, err, _) {
+              if (err == null) return const SizedBox.shrink();
+              return Container(
+                width: double.infinity,
+                color: Theme.of(context).colorScheme.errorContainer,
+                padding: const EdgeInsets.all(8),
+                child: Text('Background/notification setup failed: $err',
+                    style: const TextStyle(fontSize: 12)),
+              );
+            },
+          ),
+          Expanded(
+            child: IndexedStack(index: _tab, children: [
+              GetTab(onQueued: () => setState(() => _tab = 1)),
+              const DownloadsTab(),
+            ]),
+          ),
         ]),
         bottomNavigationBar: NavigationBar(
           selectedIndex: _tab,
