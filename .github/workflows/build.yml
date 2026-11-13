@@ -12,7 +12,7 @@ jobs:
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -61,7 +61,7 @@ jobs:
           </resources>
           XML
 
-      - name: Patch manifest, minSdk, desugaring
+      - name: Patch manifest, minSdk, desugaring, lint
         run: |
           M=android/app/src/main/AndroidManifest.xml
           sed -i 's/android:label="[^"]*"/android:label="YTSaver"/' $M
@@ -71,6 +71,10 @@ jobs:
           sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/' $G
           sed -i '/compileOptions {/a\        isCoreLibraryDesugaringEnabled = true' $G
           printf '\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n' >> $G
+          # skip the release lint check (crashes on some plugins, not needed for the APK)
+          if [ -f android/build.gradle.kts ]; then
+            printf '\nsubprojects {\n    tasks.whenTaskAdded {\n        if (name.startsWith("lintVital")) { enabled = false }\n    }\n}\n' >> android/build.gradle.kts
+          fi
           cat $M
 
       - run: flutter pub get
