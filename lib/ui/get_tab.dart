@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
+import '../audio_tracks.dart';
 import '../download_manager.dart';
 import '../links.dart';
 import '../models.dart';
@@ -26,7 +27,8 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
   // single video
   VideoInfo? _info;
   List<VideoOnlyStreamInfo> _videos = [];
-  List<AudioOnlyStreamInfo> _audios = [];
+  List<AudioTrackGroup> _tracks = [];
+  AudioTrackGroup? _track; // currently selected audio language
   VideoOnlyStreamInfo? _v;
   AudioOnlyStreamInfo? _a;
   Mode _mode = Mode.both;
@@ -42,6 +44,12 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
   bool _loading = false;
   String? _error;
   String? _clipLink;
+
+  /// Audio streams of the selected language, best first.
+  List<AudioOnlyStreamInfo> get _audios =>
+      _track?.streams ?? <AudioOnlyStreamInfo>[];
+
+  AudioTrackGroup? get _defaultTrack => defaultTrack(_tracks);
 
   @override
   void initState() {
@@ -122,14 +130,16 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
       } else {
         final info = await manager.fetch(normalizeYoutubeInput(url));
         final vs = sortedVideos(info.manifest);
-        final aus = sortedAudios(info.manifest);
+        final tracks = groupTracks(info.manifest);
+        final tr = defaultTrack(tracks); // original language by default
         if (!mounted) return;
         setState(() {
           _info = info;
           _videos = vs;
-          _audios = aus;
+          _tracks = tracks;
+          _track = tr;
           _v = vs.firstOrNull;
-          _a = aus.firstOrNull;
+          _a = tr?.streams.firstOrNull;
           _linkedPlaylistId = listId;
           _mode = settings.defaultPreset == QualityPreset.audio
               ? Mode.audioOnly
@@ -196,6 +206,65 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
     manager.enqueueBatch(vids, _batchPreset);
     if (settings.haptics) HapticFeedback.mediumImpact();
     _toast('${vids.length} video${vids.length == 1 ? '' : 's'} queued');
+  }
+
+  // ---------- audio language ----------
+
+  String _trackLabel(AudioTrackGroup t) {
+    final n = t.name.isEmpty ? 'Unknown language' : t.name;
+    return t == _defaultTrack ? '$n · default' : n;
+  }
+
+  AudioOnlyStreamInfo? _nearest(
+      List<AudioOnlyStreamInfo> list, AudioOnlyStreamInfo? prev) {
+    if (list.isEmpty) return null;
+    if (prev == null) return list.first;
+    final same = list.where((s) => s.container.name == prev.container.name);
+    final pool = [...(same.isEmpty ? list : same)];
+    final target = prev.bitrate.bitsPerSecond;
+    pool.sort((x, y) => (x.bitrate.bitsPerSecond - target)
+        .abs()
+        .compareTo((y.bitrate.bitsPerSecond - target).abs()));
+    return pool.first;
+  }
+
+  void _pickTrack(AudioTrackGroup g) {
+    setState(() {
+      final prev = _a;
+      _track = g;
+      _a = _nearest(g.streams, prev);
+    });
+  }
+
+  void _showTrackSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          children: [
+            Text('Audio language',
+                style: Theme.of(ctx).textTheme.titleMedium),
+            const SizedBox(height: 8),
+            for (final t in _tracks)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                selected: t == _track,
+                leading: Icon(t == _track
+                    ? Icons.radio_button_checked
+                    : Icons.radio_button_off),
+                title: Text(_trackLabel(t)),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _pickTrack(t);
+                },
+              ),
+          ],
+        ),
+      ),
+    );
   }
 
   // ---------- custom selection helpers ----------
@@ -425,6 +494,30 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
             const Icon(Icons.chevron_right),
           ]),
         ),
+      if (_tracks.length > 1 && _track != null)
+        SoftCard(
+          onTap: _showTrackSheet,
+          child: Row(children: [
+            Icon(Icons.translate, color: cs.primary, size: 28),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('Audio language',
+                    style: Theme.of(context)
+                        .textTheme
+                        .titleSmall
+                        ?.copyWith(fontWeight: FontWeight.w700)),
+                Text(_trackLabel(_track!),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall),
+              ]),
+            ),
+            Text('${_tracks.length} tracks',
+                style: Theme.of(context).textTheme.bodySmall),
+            const Icon(Icons.chevron_right),
+          ]),
+        ),
       const SectionTitle('Quick download'),
       for (final e in picks.entries)
         _presetTile(
@@ -553,8 +646,24 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
           ),
       ],
       if (_mode != Mode.videoOnly) ...[
+        if (_tracks.length > 1) ...[
+          const SizedBox(height: 14),
+          Text('Audio language', style: Theme.of(context).textTheme.labelLarge),
+          const SizedBox(height: 6),
+          Wrap(spacing: 8, runSpacing: 4, children: [
+            for (final t in _tracks)
+              ChoiceChip(
+                avatar: t == _defaultTrack
+                    ? const Icon(Icons.star, size: 16)
+                    : null,
+                label: Text(t.name.isEmpty ? 'Unknown' : t.name),
+                selected: t == _track,
+                onSelected: (_) => _pickTrack(t),
+              ),
+          ]),
+        ],
         const SizedBox(height: 14),
-        Text('Audio', style: Theme.of(context).textTheme.labelLarge),
+        Text('Audio quality', style: Theme.of(context).textTheme.labelLarge),
         const SizedBox(height: 6),
         Wrap(spacing: 8, runSpacing: 4, children: [
           for (final s in _audios)
@@ -657,7 +766,8 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
       ),
       const SizedBox(height: 8),
       Text(
-        'Videos are prepared one at a time to stay under YouTube\'s rate limits.',
+        'Original-language audio is used. Videos are prepared one at a time '
+        'to stay under YouTube\'s rate limits.',
         style: Theme.of(context)
             .textTheme
             .bodySmall

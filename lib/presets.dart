@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
+import 'audio_tracks.dart';
 import 'download_manager.dart';
 import 'settings.dart';
 
@@ -54,10 +55,10 @@ List<VideoOnlyStreamInfo> sortedVideos(StreamManifest m) =>
         return y.bitrate.bitsPerSecond.compareTo(x.bitrate.bitsPerSecond);
       });
 
-/// Audio-only streams, highest bitrate first.
+/// Audio-only streams of the ORIGINAL (default) language track,
+/// highest bitrate first.
 List<AudioOnlyStreamInfo> sortedAudios(StreamManifest m) =>
-    [...m.audioOnly]..sort(
-        (x, y) => y.bitrate.bitsPerSecond.compareTo(x.bitrate.bitsPerSecond));
+    defaultTrack(groupTracks(m))?.streams ?? <AudioOnlyStreamInfo>[];
 
 /// [videos] and [audios] must be sorted best-first (see helpers above).
 PresetPick pickPreset(

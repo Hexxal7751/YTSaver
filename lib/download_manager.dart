@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
+import 'audio_tracks.dart';
 import 'background.dart';
 import 'models.dart';
 import 'presets.dart';
@@ -74,9 +75,12 @@ String describeVideo(VideoOnlyStreamInfo s) =>
     '${s.qualityLabel} · ${vcodecName(s.videoCodec)} · ${s.container.name} · '
     '${fmtBytes(s.size.totalBytes)}';
 
-String describeAudio(AudioOnlyStreamInfo s) =>
-    '${acodecName(s.audioCodec)} · ${s.bitrate.kiloBitsPerSecond.round()} kbps · '
-    '${s.container.name} · ${fmtBytes(s.size.totalBytes)}';
+String describeAudio(AudioOnlyStreamInfo s) {
+  final lang = s.audioTrack?.displayName ?? '';
+  return '${lang.isEmpty ? '' : '$lang · '}${acodecName(s.audioCodec)} · '
+      '${s.bitrate.kiloBitsPerSecond.round()} kbps · '
+      '${s.container.name} · ${fmtBytes(s.size.totalBytes)}';
+}
 
 class DownloadManager extends ChangeNotifier {
   final List<DownloadTask> tasks = [];
@@ -200,11 +204,16 @@ class DownloadManager extends ChangeNotifier {
   // ---------- downloading ----------
 
   void enqueue(DownloadRequest r) {
-    final label = [
+    final a = r.audioStream;
+    final base = [
       if (r.videoStream != null) r.videoStream!.qualityLabel,
-      if (r.audioStream != null)
-        '${r.audioStream!.bitrate.kiloBitsPerSecond.round()}kbps',
+      if (a != null) '${a.bitrate.kiloBitsPerSecond.round()}kbps',
     ].join(' + ');
+    // Mention the language in the name when it is not the original track.
+    final lang = (a != null && a.audioTrack != null && !isOriginalTrack(a))
+        ? a.audioTrack!.displayName
+        : '';
+    final label = lang.isEmpty ? base : '$base · $lang';
     final t = DownloadTask(
       title: r.video.title,
       label: label,
@@ -224,9 +233,9 @@ class DownloadManager extends ChangeNotifier {
 
   Future<void> _batchChain = Future.value();
 
-  /// Queues many videos with one quality preset. They are processed one at a
-  /// time (qualities are read right before each download) to stay under
-  /// YouTube's rate limits.
+  /// Queues many videos with one quality preset (original-language audio).
+  /// They are processed one at a time (qualities are read right before each
+  /// download) to stay under YouTube's rate limits.
   void enqueueBatch(List<Video> videos, QualityPreset preset) {
     if (videos.isEmpty) return;
     final items = <MapEntry<DownloadTask, Video>>[];
@@ -402,7 +411,7 @@ class DownloadManager extends ChangeNotifier {
       } else {
         ext = r.audioStream!.container.name == 'mp4' ? 'm4a' : 'webm';
       }
-      final out = '${dir.path}/$name [${t.label}].$ext';
+      final out = '${dir.path}/$name [${_safe(t.label)}].$ext';
 
       if (temp.length == 2) {
         t.state = TaskState.merging;
@@ -425,8 +434,8 @@ class DownloadManager extends ChangeNotifier {
           t.log('Saving video and audio as separate files instead…');
           final vExt = r.videoStream!.container.name;
           final aExt = r.audioStream!.container.name == 'mp4' ? 'm4a' : 'webm';
-          final vOut = '${dir.path}/$name [${t.label}] video.$vExt';
-          final aOut = '${dir.path}/$name [${t.label}] audio.$aExt';
+          final vOut = '${dir.path}/$name [${_safe(t.label)}] video.$vExt';
+          final aOut = '${dir.path}/$name [${_safe(t.label)}] audio.$aExt';
           await temp[0].copy(vOut);
           await temp[1].copy(aOut);
           t.outputPath = vOut;
