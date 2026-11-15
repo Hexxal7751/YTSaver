@@ -3,8 +3,12 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-const videoDir = '/storage/emulated/0/Movies/YTSaver';
-const audioDir = '/storage/emulated/0/Music/YTSaver';
+import 'settings.dart';
+
+/// Current save folders (they depend on the settings).
+String get videoDir => settings.videoPath;
+String get audioDir => settings.audioPath;
+
 const _root = '/storage/emulated/0/';
 
 /// Opens [dir] in the system Files app. Returns false if that isn't possible.

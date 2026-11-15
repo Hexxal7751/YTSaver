@@ -1,6 +1,14 @@
 import 'package:flutter/foundation.dart';
 
-enum TaskState { queued, downloading, merging, done, failed, cancelled }
+enum TaskState {
+  queued,
+  waitingWifi,
+  downloading,
+  merging,
+  done,
+  failed,
+  cancelled,
+}
 
 class DownloadTask extends ChangeNotifier {
   DownloadTask({
@@ -36,6 +44,7 @@ class DownloadTask extends ChangeNotifier {
   String? note; // extra message when done (e.g. merge fallback)
   int? fileBytes;
   bool cancelRequested = false;
+  bool forceMobile = false; // "use mobile data anyway" while waiting for Wi-Fi
   Object? retryPayload; // DownloadRequest or BatchItem, used by "Retry"
   final List<String> logs = [];
 
@@ -46,6 +55,7 @@ class DownloadTask extends ChangeNotifier {
 
   bool get active =>
       state == TaskState.queued ||
+      state == TaskState.waitingWifi ||
       state == TaskState.downloading ||
       state == TaskState.merging;
 

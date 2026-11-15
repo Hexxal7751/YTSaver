@@ -78,14 +78,14 @@ jobs:
           G=android/app/build.gradle.kts
           sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/' $G
           sed -i '/compileOptions {/a\        isCoreLibraryDesugaringEnabled = true' $G
-          printf '\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n' >> $G
+          printf '\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n    implementation("androidx.core:core:1.13.1")\n}\n' >> $G
           # skip the release lint check (crashes on some plugins, not needed for the APK)
           if [ -f android/build.gradle.kts ]; then
             printf '\nsubprojects {\n    tasks.whenTaskAdded {\n        if (name.startsWith("lintVital")) { enabled = false }\n    }\n}\n' >> android/build.gradle.kts
           fi
           cat $M
 
-      - name: Add share-intent glue (MainActivity)
+      - name: Native glue (MainActivity, FileProvider, network state)
         run: |
           set -e
           F=$(find android/app/src/main -name 'MainActivity.*' | head -1)
@@ -94,18 +94,28 @@ jobs:
           rm -f "$F"
           printf '%s\n\n' "$PKG" > "$DIR/MainActivity.kt"
           cat >> "$DIR/MainActivity.kt" <<'KOTLIN'
+          import android.content.Context
           import android.content.Intent
+          import android.net.ConnectivityManager
+          import android.net.NetworkCapabilities
+          import android.webkit.MimeTypeMap
+          import androidx.core.content.FileProvider
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
+          import java.io.File
+
+          class YtFileProvider : FileProvider()
 
           class MainActivity : FlutterActivity() {
-              private var channel: MethodChannel? = null
+              private var shareChannel: MethodChannel? = null
               private var pending: String? = null
 
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
-                  val ch = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "ytsaver/share")
+                  val messenger = flutterEngine.dartExecutor.binaryMessenger
+
+                  val ch = MethodChannel(messenger, "ytsaver/share")
                   ch.setMethodCallHandler { call, result ->
                       if (call.method == "getInitial") {
                           result.success(pending)
@@ -114,7 +124,19 @@ jobs:
                           result.notImplemented()
                       }
                   }
-                  channel = ch
+                  shareChannel = ch
+
+                  MethodChannel(messenger, "ytsaver/native").setMethodCallHandler { call, result ->
+                      when (call.method) {
+                          "openFile" -> result.success(openFile(call.argument<String>("path")))
+                          "shareFile" -> result.success(
+                              shareFile(call.argument<String>("path"), call.argument<String>("title"))
+                          )
+                          "netType" -> result.success(netType())
+                          else -> result.notImplemented()
+                      }
+                  }
+
                   handleShare(intent, false)
               }
 
@@ -130,15 +152,103 @@ jobs:
                       val text = i.getStringExtra(Intent.EXTRA_TEXT) ?: return
                       i.action = null
                       if (live) {
-                          channel?.invokeMethod("shared", text)
+                          shareChannel?.invokeMethod("shared", text)
                       } else {
                           pending = text
                       }
                   }
               }
+
+              private fun uriFor(path: String) =
+                  FileProvider.getUriForFile(this, "$packageName.fileprovider", File(path))
+
+              private fun mimeFor(path: String): String {
+                  val ext = path.substringAfterLast('.', "").lowercase()
+                  return when (ext) {
+                      "mkv" -> "video/x-matroska"
+                      "webm" -> "video/webm"
+                      "mp4" -> "video/mp4"
+                      "m4a" -> "audio/mp4"
+                      else -> MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "*/*"
+                  }
+              }
+
+              private fun openFile(path: String?): Boolean {
+                  if (path == null) return false
+                  return try {
+                      val i = Intent(Intent.ACTION_VIEW)
+                      i.setDataAndType(uriFor(path), mimeFor(path))
+                      i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                      startActivity(i)
+                      true
+                  } catch (e: Exception) {
+                      false
+                  }
+              }
+
+              private fun shareFile(path: String?, title: String?): Boolean {
+                  if (path == null) return false
+                  return try {
+                      val send = Intent(Intent.ACTION_SEND)
+                      send.type = mimeFor(path)
+                      send.putExtra(Intent.EXTRA_STREAM, uriFor(path))
+                      send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                      startActivity(Intent.createChooser(send, title ?: "Share"))
+                      true
+                  } catch (e: Exception) {
+                      false
+                  }
+              }
+
+              private fun netType(): String {
+                  return try {
+                      val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                      val net = cm.activeNetwork
+                      val caps = if (net == null) null else cm.getNetworkCapabilities(net)
+                      when {
+                          caps == null -> "none"
+                          caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+                          caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+                          caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+                          else -> "other"
+                      }
+                  } catch (e: Exception) {
+                      "unknown"
+                  }
+              }
           }
           KOTLIN
-          cat "$DIR/MainActivity.kt" | head -5
+
+          mkdir -p android/app/src/main/res/xml
+          cat > android/app/src/main/res/xml/file_paths.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <paths>
+              <external-path name="shared_storage" path="." />
+              <external-files-path name="app_external" path="." />
+              <cache-path name="app_cache" path="." />
+          </paths>
+          XML
+
+          python3 - <<'PY'
+          p = 'android/app/src/main/AndroidManifest.xml'
+          s = open(p).read()
+          provider = '''    <provider
+                      android:name=".YtFileProvider"
+                      android:authorities="${applicationId}.fileprovider"
+                      android:exported="false"
+                      android:grantUriPermissions="true">
+                      <meta-data
+                          android:name="android.support.FILE_PROVIDER_PATHS"
+                          android:resource="@xml/file_paths"/>
+                  </provider>
+              '''
+          if 'YtFileProvider' not in s:
+              s = s.replace('</application>', provider + '</application>', 1)
+          if 'ACCESS_NETWORK_STATE' not in s:
+              s = s.replace('<application', '<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>\n    <application', 1)
+          open(p, 'w').write(s)
+          PY
+          cat android/app/src/main/AndroidManifest.xml
 
       - run: flutter pub get
       - run: flutter build apk --release --target-platform android-arm64
