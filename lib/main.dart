@@ -3,6 +3,7 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
 import 'background.dart';
 import 'download_manager.dart';
+import 'models.dart';
 import 'open_helper.dart';
 import 'settings.dart';
 import 'share_intake.dart';
@@ -53,17 +54,49 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     sharedLink.addListener(_onShare);
+    manager.mobileDataPrompt = _askMobileData;
   }
 
   @override
   void dispose() {
     sharedLink.removeListener(_onShare);
+    manager.mobileDataPrompt = null;
     super.dispose();
   }
 
   // A link was shared into the app: show the Get tab.
   void _onShare() {
     if (mounted && _tab != 0) setState(() => _tab = 0);
+  }
+
+  /// Big download on mobile data: let the user decide.
+  Future<String> _askMobileData(int bytes) async {
+    if (!mounted) return 'now';
+    final r = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (c) => AlertDialog(
+        icon: const Icon(Icons.signal_cellular_alt),
+        title: const Text('Use mobile data?'),
+        content: Text(
+            'This download is ${fmtBytes(bytes)} and you are not on Wi-Fi.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c, 'cancel'),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(c, 'wait'),
+            child: const Text('Wait for Wi-Fi'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, 'now'),
+            child: const Text('Download now'),
+          ),
+        ],
+      ),
+    );
+    return r ?? 'cancel';
   }
 
   @override

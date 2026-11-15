@@ -11,7 +11,9 @@ import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
 import 'audio_tracks.dart';
 import 'background.dart';
+import 'filenames.dart';
 import 'models.dart';
+import 'native.dart';
 import 'presets.dart';
 import 'settings.dart';
 
@@ -86,6 +88,12 @@ class DownloadManager extends ChangeNotifier {
   final List<DownloadTask> tasks = [];
   final YoutubeExplode _yt = YoutubeExplode();
 
+  /// Set by the UI: asks whether a big download may use mobile data.
+  /// Must return 'now', 'wait' or 'cancel'.
+  Future<String> Function(int bytes)? mobileDataPrompt;
+  DateTime? _mobileApprovedUntil;
+  Future<String>? _promptFuture;
+
   // ---------- history (saved on disk) ----------
 
   Future<void>? _histLoad;
@@ -119,6 +127,22 @@ class DownloadManager extends ChangeNotifier {
           .toList();
       await (await _historyFile()).writeAsString(jsonEncode(done));
     } catch (_) {}
+  }
+
+  /// Removes finished entries whose file no longer exists.
+  Future<void> pruneMissing() async {
+    final gone = <DownloadTask>[];
+    for (final t in tasks) {
+      if (t.state == TaskState.done) {
+        final p = t.outputPath;
+        if (p == null || !await File(p).exists()) gone.add(t);
+      }
+    }
+    if (gone.isNotEmpty) {
+      tasks.removeWhere(gone.contains);
+      notifyListeners();
+      _saveHistory();
+    }
   }
 
   // ---------- list management ----------
@@ -329,9 +353,7 @@ class DownloadManager extends ChangeNotifier {
   }
 
   Future<Directory> _outDir(bool audioOnly) async {
-    final base = audioOnly
-        ? '/storage/emulated/0/Music/YTSaver'
-        : '/storage/emulated/0/Movies/YTSaver';
+    final base = audioOnly ? settings.audioPath : settings.videoPath;
     try {
       final d = Directory(base);
       await d.create(recursive: true);
@@ -342,8 +364,55 @@ class DownloadManager extends ChangeNotifier {
     }
   }
 
-  String _safe(String s) =>
-      s.replaceAll(RegExp(r'[\\/:*?"<>|\n\r]'), '_').trim();
+  /// Handles "Wi-Fi only" and the big-download warning on mobile data.
+  /// Returns false if the user cancelled (or the task was removed).
+  Future<bool> _networkGate(DownloadTask t, int bytes) async {
+    var net = await Native.netType();
+    if (net != 'cellular') return true;
+
+    var waitForWifi = settings.wifiOnly;
+    if (!waitForWifi) {
+      final limit = settings.warnMobileMb * 1024 * 1024;
+      final until = _mobileApprovedUntil;
+      final approved = until != null && DateTime.now().isBefore(until);
+      if (settings.warnMobileMb <= 0 || bytes <= limit || approved) {
+        return true;
+      }
+      final prompt = mobileDataPrompt;
+      var choice = 'now';
+      if (prompt != null) {
+        final future = _promptFuture ??=
+            prompt(bytes).whenComplete(() => _promptFuture = null);
+        choice = await future;
+      }
+      if (choice == 'cancel') return false;
+      if (choice == 'now') {
+        _mobileApprovedUntil = DateTime.now().add(const Duration(minutes: 15));
+        return true;
+      }
+      waitForWifi = true;
+    }
+
+    if (waitForWifi) {
+      t.state = TaskState.waitingWifi;
+      t.log('Waiting for Wi-Fi…');
+      t.touch();
+      notifyListeners();
+      syncNotification(force: true);
+      while (true) {
+        await Future<void>.delayed(const Duration(seconds: 2));
+        if (t.cancelRequested || !tasks.contains(t)) return false;
+        if (t.forceMobile) {
+          t.log('Using mobile data (your choice)');
+          return true;
+        }
+        net = await Native.netType();
+        if (net != 'cellular') break;
+      }
+      t.log('Wi-Fi connected');
+    }
+    return true;
+  }
 
   Future<void> _run(DownloadTask t, DownloadRequest r,
       {bool notify = true}) async {
@@ -357,6 +426,9 @@ class DownloadManager extends ChangeNotifier {
         if (r.audioStream != null) r.audioStream!,
       ];
       t.total = streams.fold(0, (s, e) => s + e.size.totalBytes);
+
+      if (!await _networkGate(t, t.total)) throw _Cancelled();
+
       t.state = TaskState.downloading;
       notifyListeners();
       t.log('Total to download: ${fmtBytes(t.total)}');
@@ -399,7 +471,6 @@ class DownloadManager extends ChangeNotifier {
       t.progress = 1;
       final audioOnly = r.videoStream == null;
       final dir = await _outDir(audioOnly);
-      final name = _safe(r.video.title);
       String ext;
       if (r.videoStream != null && r.audioStream != null) {
         ext = (r.videoStream!.container.name == 'mp4' &&
@@ -411,7 +482,14 @@ class DownloadManager extends ChangeNotifier {
       } else {
         ext = r.audioStream!.container.name == 'mp4' ? 'm4a' : 'webm';
       }
-      final out = '${dir.path}/$name [${_safe(t.label)}].$ext';
+      final base = renderName(
+        settings.filenameTemplate,
+        title: r.video.title,
+        quality: t.label,
+        channel: r.video.author,
+        id: id,
+      );
+      final out = uniquePath(dir.path, base, ext);
 
       if (temp.length == 2) {
         t.state = TaskState.merging;
@@ -434,8 +512,8 @@ class DownloadManager extends ChangeNotifier {
           t.log('Saving video and audio as separate files instead…');
           final vExt = r.videoStream!.container.name;
           final aExt = r.audioStream!.container.name == 'mp4' ? 'm4a' : 'webm';
-          final vOut = '${dir.path}/$name [${_safe(t.label)}] video.$vExt';
-          final aOut = '${dir.path}/$name [${_safe(t.label)}] audio.$aExt';
+          final vOut = uniquePath(dir.path, '$base video', vExt);
+          final aOut = uniquePath(dir.path, '$base audio', aExt);
           await temp[0].copy(vOut);
           await temp[1].copy(aOut);
           t.outputPath = vOut;
@@ -498,9 +576,11 @@ class DownloadManager extends ChangeNotifier {
         .toList();
     final first = working.isNotEmpty ? working.first : active.first;
     final pct = (first.progress * 100).round();
-    final text = first.state == TaskState.merging
-        ? 'Merging video + audio…'
-        : '$pct% · ${fmtBytes(first.speed)}/s';
+    final text = switch (first.state) {
+      TaskState.merging => 'Merging video + audio…',
+      TaskState.waitingWifi => 'Waiting for Wi-Fi…',
+      _ => '$pct% · ${fmtBytes(first.speed)}/s',
+    };
     Bg.update(
       active.length > 1
           ? '${active.length} downloads · ${first.title}'

@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'download_manager.dart';
+import 'models.dart';
 import 'settings.dart';
 
 /// Current save folders (they depend on the settings).
@@ -34,5 +36,21 @@ Future<void> openFolderWithFeedback(BuildContext context, String dir) async {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Could not open the Files app. Folder: $dir')),
     );
+  }
+}
+
+/// Removes finished entries whose file no longer exists.
+extension PruneHistory on DownloadManager {
+  Future<void> pruneMissing() async {
+    final gone = <DownloadTask>[];
+    for (final t in List<DownloadTask>.of(tasks)) {
+      if (t.state == TaskState.done) {
+        final p = t.outputPath;
+        if (p == null || !await File(p).exists()) gone.add(t);
+      }
+    }
+    for (final t in gone) {
+      remove(t);
+    }
   }
 }
