@@ -7,6 +7,7 @@ import '../links.dart';
 import '../models.dart';
 import '../presets.dart';
 import '../settings.dart';
+import '../share_intake.dart';
 import '../theme.dart';
 import 'widgets.dart';
 
@@ -21,15 +22,24 @@ class GetTab extends StatefulWidget {
 
 class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
   final _ctrl = TextEditingController();
+
+  // single video
   VideoInfo? _info;
   List<VideoOnlyStreamInfo> _videos = [];
   List<AudioOnlyStreamInfo> _audios = [];
   VideoOnlyStreamInfo? _v;
   AudioOnlyStreamInfo? _a;
   Mode _mode = Mode.both;
-  bool _loading = false;
   bool _isShort = false;
   bool _custom = false;
+  String? _linkedPlaylistId;
+
+  // playlist
+  PlaylistInfo? _playlist;
+  final Set<String> _sel = {};
+  QualityPreset _batchPreset = QualityPreset.best;
+
+  bool _loading = false;
   String? _error;
   String? _clipLink;
 
@@ -37,15 +47,20 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    sharedLink.addListener(_onShared);
     _ctrl.addListener(() {
       if (mounted) setState(() {});
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) => _checkClipboard());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkClipboard();
+      _onShared();
+    });
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    sharedLink.removeListener(_onShared);
     _ctrl.dispose();
     super.dispose();
   }
@@ -53,6 +68,15 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) _checkClipboard();
+  }
+
+  // A link was shared from another app (Share -> YTSaver).
+  void _onShared() {
+    final e = sharedLink.value;
+    if (e == null || e.handled || !mounted) return;
+    e.handled = true;
+    final link = extractYoutubeLink(e.text) ?? e.text.trim();
+    if (link.isNotEmpty) _fetch(link);
   }
 
   Future<void> _checkClipboard() async {
@@ -81,41 +105,79 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
     final url = _ctrl.text.trim();
     if (url.isEmpty) return;
     FocusScope.of(context).unfocus();
+    final listId = extractPlaylistId(url);
     setState(() {
       _loading = true;
       _error = null;
       _info = null;
+      _playlist = null;
       _clipLink = null;
       _custom = false;
+      _linkedPlaylistId = null;
       _isShort = url.contains('/shorts/');
     });
     try {
-      final info = await manager.fetch(normalizeYoutubeInput(url));
-      final vs = [...info.manifest.videoOnly]..sort((x, y) {
-          final h = y.videoResolution.height.compareTo(x.videoResolution.height);
-          if (h != 0) return h;
-          final f = y.framerate.framesPerSecond
-              .compareTo(x.framerate.framesPerSecond);
-          if (f != 0) return f;
-          return y.bitrate.bitsPerSecond.compareTo(x.bitrate.bitsPerSecond);
+      if (listId != null && isPlaylistOnlyLink(url)) {
+        await _loadPlaylistInner(listId);
+      } else {
+        final info = await manager.fetch(normalizeYoutubeInput(url));
+        final vs = sortedVideos(info.manifest);
+        final aus = sortedAudios(info.manifest);
+        if (!mounted) return;
+        setState(() {
+          _info = info;
+          _videos = vs;
+          _audios = aus;
+          _v = vs.firstOrNull;
+          _a = aus.firstOrNull;
+          _linkedPlaylistId = listId;
+          _mode = settings.defaultPreset == QualityPreset.audio
+              ? Mode.audioOnly
+              : Mode.both;
         });
-      final aus = [...info.manifest.audioOnly]..sort(
-          (x, y) => y.bitrate.bitsPerSecond.compareTo(x.bitrate.bitsPerSecond));
-      setState(() {
-        _info = info;
-        _videos = vs;
-        _audios = aus;
-        _v = vs.firstOrNull;
-        _a = aus.firstOrNull;
-        _mode = settings.defaultPreset == QualityPreset.audio
-            ? Mode.audioOnly
-            : Mode.both;
-      });
+      }
     } catch (e) {
-      setState(() => _error = '$e');
+      if (mounted) setState(() => _error = '$e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  Future<void> _loadPlaylist(String id) async {
+    setState(() {
+      _loading = true;
+      _error = null;
+      _info = null;
+      _playlist = null;
+    });
+    try {
+      await _loadPlaylistInner(id);
+    } catch (e) {
+      if (mounted) setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _loadPlaylistInner(String id) async {
+    final pl = await manager.fetchPlaylist(id);
+    if (!mounted) return;
+    setState(() {
+      _playlist = pl;
+      _sel
+        ..clear()
+        ..addAll(pl.videos.map((v) => v.id.value));
+      _batchPreset = settings.defaultPreset;
+    });
+  }
+
+  void _toast(String msg) {
+    final m = ScaffoldMessenger.of(context);
+    m.hideCurrentSnackBar();
+    m.showSnackBar(SnackBar(
+      content: Text(msg),
+      action: SnackBarAction(label: 'VIEW', onPressed: widget.onQueued),
+    ));
   }
 
   void _enqueue({VideoOnlyStreamInfo? v, AudioOnlyStreamInfo? a}) {
@@ -123,12 +185,17 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
     if (info == null || (v == null && a == null)) return;
     manager.enqueue(DownloadRequest(info.video, videoStream: v, audioStream: a));
     if (settings.haptics) HapticFeedback.mediumImpact();
-    final m = ScaffoldMessenger.of(context);
-    m.hideCurrentSnackBar();
-    m.showSnackBar(SnackBar(
-      content: const Text('Added to downloads'),
-      action: SnackBarAction(label: 'VIEW', onPressed: widget.onQueued),
-    ));
+    _toast('Added to downloads');
+  }
+
+  void _downloadPlaylist() {
+    final pl = _playlist;
+    if (pl == null) return;
+    final vids = pl.videos.where((v) => _sel.contains(v.id.value)).toList();
+    if (vids.isEmpty) return;
+    manager.enqueueBatch(vids, _batchPreset);
+    if (settings.haptics) HapticFeedback.mediumImpact();
+    _toast('${vids.length} video${vids.length == 1 ? '' : 's'} queued');
   }
 
   // ---------- custom selection helpers ----------
@@ -158,8 +225,10 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
         if (_clipLink != null && !_loading) _clipChip(),
         if (_loading) _loadingCard(),
         if (_error != null) _errorCard(),
-        if (_info == null && !_loading && _error == null) _hero(),
+        if (_info == null && _playlist == null && !_loading && _error == null)
+          _hero(),
         if (_info != null) ..._results(),
+        if (_playlist != null) ..._playlistSection(),
       ],
     );
   }
@@ -173,7 +242,7 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
           textInputAction: TextInputAction.go,
           onSubmitted: (_) => _fetch(),
           decoration: InputDecoration(
-            hintText: 'Paste a YouTube or Shorts link',
+            hintText: 'Paste a video, Shorts or playlist link',
             prefixIcon: const Icon(Icons.link),
             border: InputBorder.none,
             suffixIcon: _ctrl.text.isEmpty
@@ -188,6 +257,7 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
                     onPressed: () => setState(() {
                       _ctrl.clear();
                       _info = null;
+                      _playlist = null;
                       _error = null;
                     }),
                   ),
@@ -197,7 +267,7 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
         SizedBox(
           width: double.infinity,
           child: GradientButton(
-            label: _loading ? 'Reading video…' : 'Fetch formats',
+            label: _loading ? 'Reading…' : 'Fetch',
             icon: Icons.search,
             busy: _loading,
             onPressed: _ctrl.text.trim().isEmpty ? null : () => _fetch(),
@@ -226,7 +296,7 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
       child: Column(children: [
         LinearProgressIndicator(),
         SizedBox(height: 12),
-        Text('Reading available qualities…'),
+        Text('Reading from YouTube…'),
       ]),
     );
   }
@@ -238,7 +308,7 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
         Row(children: [
           Icon(Icons.error_outline, color: cs.error),
           const SizedBox(width: 8),
-          Text('Could not load this video',
+          Text('Could not load this link',
               style: TextStyle(color: cs.error, fontWeight: FontWeight.w700)),
         ]),
         const SizedBox(height: 8),
@@ -268,7 +338,8 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
                 .titleLarge
                 ?.copyWith(fontWeight: FontWeight.w800)),
         const SizedBox(height: 6),
-        Text('Paste a link above, pick a quality, done.',
+        Text('Paste a link, or share one straight from YouTube.',
+            textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.bodyMedium),
         const SizedBox(height: 16),
         const Wrap(
@@ -277,8 +348,10 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
           runSpacing: 8,
           children: [
             Pill('8K · 4K · 1080p', icon: Icons.hd),
+            Pill('Playlists', icon: Icons.playlist_play),
             Pill('Audio only', icon: Icons.music_note),
             Pill('Shorts', icon: Icons.bolt),
+            Pill('Share to app', icon: Icons.share),
             Pill('Background', icon: Icons.cloud_download_outlined),
           ],
         ),
@@ -286,25 +359,28 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
     );
   }
 
+  // ---------- single video ----------
+
   List<Widget> _results() {
+    final cs = Theme.of(context).colorScheme;
     final v = _info!.video;
     final up = v.uploadDate;
     final picks = <QualityPreset, PresetPick>{};
     for (final p in QualityPreset.values) {
       final pick = pickPreset(p, _videos, _audios);
       if (!pick.valid) continue;
-      final dup = picks.values.any((q) => q.video == pick.video && q.audio == pick.audio);
+      final dup = picks.values
+          .any((q) => q.video == pick.video && q.audio == pick.audio);
       if (!dup) picks[p] = pick;
     }
     final def = pickPreset(settings.defaultPreset, _videos, _audios);
 
     return [
-      // video card
       SoftCard(
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           AspectRatio(
             aspectRatio: 16 / 9,
-            child: Thumb(
+            child: VideoThumb(
               url: v.thumbnails.highResUrl,
               radius: 14,
               badge: v.duration == null ? 'LIVE' : fmtDuration(v.duration!),
@@ -329,7 +405,26 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
           ]),
         ]),
       ),
-
+      if (_linkedPlaylistId != null)
+        SoftCard(
+          onTap: () => _loadPlaylist(_linkedPlaylistId!),
+          child: Row(children: [
+            Icon(Icons.playlist_play, color: cs.primary, size: 30),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('Part of a playlist',
+                    style: Theme.of(context)
+                        .textTheme
+                        .titleSmall
+                        ?.copyWith(fontWeight: FontWeight.w700)),
+                Text('Tap to pick videos and download them all',
+                    style: Theme.of(context).textTheme.bodySmall),
+              ]),
+            ),
+            const Icon(Icons.chevron_right),
+          ]),
+        ),
       const SectionTitle('Quick download'),
       for (final e in picks.entries)
         _presetTile(
@@ -337,7 +432,6 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
           e.value,
           e.value.video == def.video && e.value.audio == def.audio,
         ),
-
       const SizedBox(height: 4),
       _customCard(),
     ];
@@ -504,5 +598,128 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
         ),
       ),
     ]);
+  }
+
+  // ---------- playlist ----------
+
+  List<Widget> _playlistSection() {
+    final cs = Theme.of(context).colorScheme;
+    final pl = _playlist!;
+    final n = _sel.length;
+    return [
+      SoftCard(
+        child: Row(children: [
+          Container(
+            width: 48,
+            height: 48,
+            decoration: const BoxDecoration(
+                gradient: brandGradient, shape: BoxShape.circle),
+            child: const Icon(Icons.playlist_play, color: Colors.white),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(pl.title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context)
+                      .textTheme
+                      .titleMedium
+                      ?.copyWith(fontWeight: FontWeight.w700)),
+              const SizedBox(height: 6),
+              Wrap(spacing: 6, runSpacing: 4, children: [
+                Pill('${pl.videos.length} videos',
+                    icon: Icons.video_library_outlined),
+                if (pl.author.isNotEmpty)
+                  Pill(pl.author, icon: Icons.person_outline, color: cs.secondary),
+              ]),
+            ]),
+          ),
+        ]),
+      ),
+      const SectionTitle('Quality for all videos'),
+      Wrap(spacing: 8, runSpacing: 4, children: [
+        for (final p in QualityPreset.values)
+          ChoiceChip(
+            avatar: Icon(p.icon, size: 16),
+            label: Text(p.title),
+            selected: _batchPreset == p,
+            onSelected: (_) => setState(() => _batchPreset = p),
+          ),
+      ]),
+      const SizedBox(height: 12),
+      GradientButton(
+        label: n == 0
+            ? 'Select videos to download'
+            : 'Download $n video${n == 1 ? '' : 's'}',
+        icon: Icons.download_rounded,
+        onPressed: n == 0 ? null : _downloadPlaylist,
+      ),
+      const SizedBox(height: 8),
+      Text(
+        'Videos are prepared one at a time to stay under YouTube\'s rate limits.',
+        style: Theme.of(context)
+            .textTheme
+            .bodySmall
+            ?.copyWith(color: cs.onSurfaceVariant),
+      ),
+      const SizedBox(height: 8),
+      Row(children: [
+        const Expanded(child: SectionTitle('Videos')),
+        TextButton(
+          onPressed: () => setState(() => _sel
+            ..clear()
+            ..addAll(pl.videos.map((v) => v.id.value))),
+          child: const Text('All'),
+        ),
+        TextButton(
+          onPressed: () => setState(_sel.clear),
+          child: const Text('None'),
+        ),
+      ]),
+      for (final v in pl.videos) _playlistRow(v),
+    ];
+  }
+
+  Widget _playlistRow(Video v) {
+    final id = v.id.value;
+    final on = _sel.contains(id);
+    void toggle() => setState(() {
+          if (on) {
+            _sel.remove(id);
+          } else {
+            _sel.add(id);
+          }
+        });
+    return SoftCard(
+      padding: const EdgeInsets.all(10),
+      onTap: toggle,
+      child: Row(children: [
+        Checkbox(value: on, onChanged: (_) => toggle()),
+        VideoThumb(
+          url: v.thumbnails.lowResUrl,
+          width: 84,
+          height: 50,
+          radius: 10,
+          badge: v.duration == null ? null : fmtDuration(v.duration!),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(v.title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context)
+                    .textTheme
+                    .bodyMedium
+                    ?.copyWith(fontWeight: FontWeight.w600)),
+            Text(v.author,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall),
+          ]),
+        ),
+      ]),
+    );
   }
 }

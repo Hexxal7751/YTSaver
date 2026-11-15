@@ -43,8 +43,23 @@ String pickSummary(PresetPick p) {
   return parts.join(' + ');
 }
 
-/// [videos] must be sorted best-first (height, fps, bitrate);
-/// [audios] sorted by bitrate, highest first.
+/// Video-only streams, best first (height, then fps, then bitrate).
+List<VideoOnlyStreamInfo> sortedVideos(StreamManifest m) =>
+    [...m.videoOnly]..sort((x, y) {
+        final h = y.videoResolution.height.compareTo(x.videoResolution.height);
+        if (h != 0) return h;
+        final f =
+            y.framerate.framesPerSecond.compareTo(x.framerate.framesPerSecond);
+        if (f != 0) return f;
+        return y.bitrate.bitsPerSecond.compareTo(x.bitrate.bitsPerSecond);
+      });
+
+/// Audio-only streams, highest bitrate first.
+List<AudioOnlyStreamInfo> sortedAudios(StreamManifest m) =>
+    [...m.audioOnly]..sort(
+        (x, y) => y.bitrate.bitsPerSecond.compareTo(x.bitrate.bitsPerSecond));
+
+/// [videos] and [audios] must be sorted best-first (see helpers above).
 PresetPick pickPreset(
   QualityPreset p,
   List<VideoOnlyStreamInfo> videos,

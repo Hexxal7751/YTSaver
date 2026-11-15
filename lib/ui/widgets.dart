@@ -137,8 +137,8 @@ class Pill extends StatelessWidget {
   }
 }
 
-class Thumb extends StatelessWidget {
-  const Thumb({
+class VideoThumb extends StatelessWidget {
+  const VideoThumb({
     super.key,
     required this.url,
     this.width,

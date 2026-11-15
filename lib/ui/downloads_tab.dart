@@ -230,7 +230,7 @@ class _TaskCard extends StatelessWidget {
         ),
       );
     }
-    return Thumb(
+    return VideoThumb(
       url: t.thumbnailUrl,
       width: 104,
       height: 62,

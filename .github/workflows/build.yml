@@ -73,6 +73,8 @@ jobs:
           sed -i 's/android:label="[^"]*"/android:label="YTSaver"/' $M
           sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n    <application android:requestLegacyExternalStorage="true"#' $M
           sed -i 's#</application>#    <service android:name="com.pravera.flutter_foreground_task.service.ForegroundService" android:foregroundServiceType="dataSync" android:exported="false"/>\n    </application>#' $M
+          # let YTSaver appear in the Android "Share" menu for text/links
+          sed -i '0,/<\/activity>/{s#</activity>#    <intent-filter>\n                <action android:name="android.intent.action.SEND"/>\n                <category android:name="android.intent.category.DEFAULT"/>\n                <data android:mimeType="text/plain"/>\n            </intent-filter>\n        </activity>#}' $M
           G=android/app/build.gradle.kts
           sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/' $G
           sed -i '/compileOptions {/a\        isCoreLibraryDesugaringEnabled = true' $G
@@ -82,6 +84,61 @@ jobs:
             printf '\nsubprojects {\n    tasks.whenTaskAdded {\n        if (name.startsWith("lintVital")) { enabled = false }\n    }\n}\n' >> android/build.gradle.kts
           fi
           cat $M
+
+      - name: Add share-intent glue (MainActivity)
+        run: |
+          set -e
+          F=$(find android/app/src/main -name 'MainActivity.*' | head -1)
+          PKG=$(grep -m1 '^package ' "$F")
+          DIR=$(dirname "$F")
+          rm -f "$F"
+          printf '%s\n\n' "$PKG" > "$DIR/MainActivity.kt"
+          cat >> "$DIR/MainActivity.kt" <<'KOTLIN'
+          import android.content.Intent
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity : FlutterActivity() {
+              private var channel: MethodChannel? = null
+              private var pending: String? = null
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  val ch = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "ytsaver/share")
+                  ch.setMethodCallHandler { call, result ->
+                      if (call.method == "getInitial") {
+                          result.success(pending)
+                          pending = null
+                      } else {
+                          result.notImplemented()
+                      }
+                  }
+                  channel = ch
+                  handleShare(intent, false)
+              }
+
+              override fun onNewIntent(intent: Intent) {
+                  super.onNewIntent(intent)
+                  setIntent(intent)
+                  handleShare(intent, true)
+              }
+
+              private fun handleShare(i: Intent?, live: Boolean) {
+                  if (i == null) return
+                  if (i.action == Intent.ACTION_SEND && i.type == "text/plain") {
+                      val text = i.getStringExtra(Intent.EXTRA_TEXT) ?: return
+                      i.action = null
+                      if (live) {
+                          channel?.invokeMethod("shared", text)
+                      } else {
+                          pending = text
+                      }
+                  }
+              }
+          }
+          KOTLIN
+          cat "$DIR/MainActivity.kt" | head -5
 
       - run: flutter pub get
       - run: flutter build apk --release --target-platform android-arm64

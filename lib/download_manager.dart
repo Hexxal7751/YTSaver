@@ -11,6 +11,7 @@ import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
 import 'background.dart';
 import 'models.dart';
+import 'presets.dart';
 import 'settings.dart';
 
 class VideoInfo {
@@ -19,11 +20,25 @@ class VideoInfo {
   final StreamManifest manifest;
 }
 
+class PlaylistInfo {
+  PlaylistInfo(this.title, this.author, this.videos);
+  final String title;
+  final String author;
+  final List<Video> videos;
+}
+
 class DownloadRequest {
   DownloadRequest(this.video, {this.videoStream, this.audioStream});
   final Video video;
   final VideoOnlyStreamInfo? videoStream;
   final AudioOnlyStreamInfo? audioStream;
+}
+
+/// A playlist item waiting for its qualities to be read (used by Retry).
+class BatchItem {
+  BatchItem(this.video, this.preset);
+  final Video video;
+  final QualityPreset preset;
 }
 
 /// Error with a human-readable message (shown directly in the UI).
@@ -35,6 +50,12 @@ class FetchError implements Exception {
 }
 
 class _Cancelled implements Exception {}
+
+const _rateLimitMsg =
+    'YouTube is rate-limiting this connection (too many requests from '
+    'this IP address).\n\nWait 30-60 minutes, or switch between Wi-Fi '
+    'and mobile data (toggling airplane mode also helps) to get a new '
+    'IP, then try again.';
 
 String vcodecName(String c) {
   if (c.startsWith('avc')) return 'H.264';
@@ -127,6 +148,9 @@ class DownloadManager extends ChangeNotifier {
     if (r is DownloadRequest) {
       tasks.remove(t);
       enqueue(r);
+    } else if (r is BatchItem) {
+      tasks.remove(t);
+      enqueueBatch([r.video], r.preset);
     }
   }
 
@@ -140,17 +164,36 @@ class DownloadManager extends ChangeNotifier {
       final manifest = await _yt.videos.streams.getManifest(video.id);
       return VideoInfo(video, manifest);
     } on RequestLimitExceededException {
-      throw FetchError(
-          'YouTube is rate-limiting this connection (too many requests from '
-          'this IP address).\n\nWait 30-60 minutes, or switch between Wi-Fi '
-          'and mobile data (toggling airplane mode also helps) to get a new '
-          'IP, then try again.');
+      throw FetchError(_rateLimitMsg);
     } on ArgumentError {
       throw FetchError('That does not look like a valid YouTube link.');
     } on YoutubeExplodeException catch (e) {
       final msg = '$e';
       throw FetchError(
           'YouTube error: ${msg.length > 300 ? msg.substring(0, 300) : msg}');
+    }
+  }
+
+  Future<PlaylistInfo> fetchPlaylist(String id) async {
+    try {
+      final pl = await _yt.playlists.get(id);
+      final vids = <Video>[];
+      await for (final v in _yt.playlists.getVideos(id)) {
+        vids.add(v);
+        if (vids.length >= 300) break;
+      }
+      if (vids.isEmpty) {
+        throw FetchError('This playlist is empty or private.');
+      }
+      return PlaylistInfo(pl.title, pl.author, vids);
+    } on RequestLimitExceededException {
+      throw FetchError(_rateLimitMsg);
+    } on ArgumentError {
+      throw FetchError('That does not look like a valid playlist link.');
+    } on YoutubeExplodeException catch (e) {
+      final msg = '$e';
+      throw FetchError(
+          'Could not load the playlist: ${msg.length > 300 ? msg.substring(0, 300) : msg}');
     }
   }
 
@@ -177,6 +220,105 @@ class DownloadManager extends ChangeNotifier {
     _run(t, r);
   }
 
+  // ---------- playlist / batch ----------
+
+  Future<void> _batchChain = Future.value();
+
+  /// Queues many videos with one quality preset. They are processed one at a
+  /// time (qualities are read right before each download) to stay under
+  /// YouTube's rate limits.
+  void enqueueBatch(List<Video> videos, QualityPreset preset) {
+    if (videos.isEmpty) return;
+    final items = <MapEntry<DownloadTask, Video>>[];
+    for (final v in videos) {
+      final t = DownloadTask(
+        title: v.title,
+        label: preset.title,
+        videoId: v.id.value,
+        thumbnailUrl: v.thumbnails.mediumResUrl,
+        channel: v.author,
+        videoDuration: v.duration,
+        audioOnly: preset == QualityPreset.audio,
+      );
+      t.retryPayload = BatchItem(v, preset);
+      t.log('Queued (playlist)');
+      items.add(MapEntry(t, v));
+    }
+    tasks.insertAll(0, items.map((e) => e.key));
+    notifyListeners();
+    _batchChain = _batchChain.then((_) => _processBatch(items, preset));
+  }
+
+  Future<void> _processBatch(
+    List<MapEntry<DownloadTask, Video>> items,
+    QualityPreset preset,
+  ) async {
+    var ok = 0;
+    var failed = 0;
+    var rateLimited = false;
+    try {
+      await Bg.start();
+      for (final e in items) {
+        final t = e.key;
+        final v = e.value;
+        if (!tasks.contains(t)) continue; // removed by the user
+        if (t.cancelRequested) {
+          t.state = TaskState.cancelled;
+          t.touch();
+          continue;
+        }
+        if (rateLimited) {
+          t.state = TaskState.failed;
+          t.error = 'Skipped: YouTube is rate-limiting this connection.';
+          t.touch();
+          failed++;
+          continue;
+        }
+        try {
+          t.log('Reading available qualities…');
+          final manifest = await _yt.videos.streams.getManifest(v.id);
+          final pick = pickPreset(
+              preset, sortedVideos(manifest), sortedAudios(manifest));
+          if (!pick.valid) throw FetchError('No suitable streams found.');
+          t.label = [
+            if (pick.video != null) pick.video!.qualityLabel,
+            if (pick.audio != null)
+              '${pick.audio!.bitrate.kiloBitsPerSecond.round()}kbps',
+          ].join(' + ');
+          final req = DownloadRequest(v,
+              videoStream: pick.video, audioStream: pick.audio);
+          await _run(t, req, notify: false);
+        } on RequestLimitExceededException {
+          rateLimited = true;
+          t.state = TaskState.failed;
+          t.error = _rateLimitMsg;
+          t.log('ERROR: rate limited');
+          t.touch();
+        } catch (err) {
+          t.state = TaskState.failed;
+          t.error = '$err';
+          t.log('ERROR: $err');
+          t.touch();
+        }
+        if (t.state == TaskState.done) {
+          ok++;
+        } else if (t.state == TaskState.failed) {
+          failed++;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 800));
+      }
+    } finally {
+      final total = items.length;
+      await Bg.notify(
+        'Playlist finished',
+        '$ok of $total saved${failed > 0 ? ', $failed failed' : ''}',
+      );
+      if (settings.haptics) HapticFeedback.mediumImpact();
+      notifyListeners();
+      syncNotification(force: true);
+    }
+  }
+
   Future<Directory> _outDir(bool audioOnly) async {
     final base = audioOnly
         ? '/storage/emulated/0/Music/YTSaver'
@@ -194,7 +336,8 @@ class DownloadManager extends ChangeNotifier {
   String _safe(String s) =>
       s.replaceAll(RegExp(r'[\\/:*?"<>|\n\r]'), '_').trim();
 
-  Future<void> _run(DownloadTask t, DownloadRequest r) async {
+  Future<void> _run(DownloadTask t, DownloadRequest r,
+      {bool notify = true}) async {
     final temp = <File>[]; // downloaded streams
     final extra = <File>[]; // merged temp output
     try {
@@ -316,9 +459,11 @@ class DownloadManager extends ChangeNotifier {
       notifyListeners();
       if (t.state == TaskState.done) {
         _saveHistory();
-        if (settings.haptics) HapticFeedback.mediumImpact();
-        await Bg.notify('Download complete', t.title);
-      } else if (t.state == TaskState.failed) {
+        if (notify) {
+          if (settings.haptics) HapticFeedback.mediumImpact();
+          await Bg.notify('Download complete', t.title);
+        }
+      } else if (t.state == TaskState.failed && notify) {
         if (settings.haptics) HapticFeedback.heavyImpact();
         await Bg.notify('Download failed', t.title);
       }
@@ -338,14 +483,20 @@ class DownloadManager extends ChangeNotifier {
       Bg.stop();
       return;
     }
-    final first = active.first;
+    final working = active
+        .where((x) =>
+            x.state == TaskState.downloading || x.state == TaskState.merging)
+        .toList();
+    final first = working.isNotEmpty ? working.first : active.first;
     final pct = (first.progress * 100).round();
     final text = first.state == TaskState.merging
         ? 'Merging video + audio…'
         : '$pct% · ${fmtBytes(first.speed)}/s';
     Bg.update(
-      active.length > 1 ? '${active.length} downloads' : first.title,
-      active.length > 1 ? 'Working in the background…' : text,
+      active.length > 1
+          ? '${active.length} downloads · ${first.title}'
+          : first.title,
+      text,
     );
   }
 

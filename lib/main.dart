@@ -5,6 +5,7 @@ import 'background.dart';
 import 'download_manager.dart';
 import 'open_helper.dart';
 import 'settings.dart';
+import 'share_intake.dart';
 import 'theme.dart';
 import 'ui/downloads_tab.dart';
 import 'ui/get_tab.dart';
@@ -17,6 +18,7 @@ void main() {
   settings.load();
   manager.loadHistory();
   Bg.init();
+  ShareIntake.init();
 }
 
 class YtSaverApp extends StatelessWidget {
@@ -46,6 +48,23 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   int _tab = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    sharedLink.addListener(_onShare);
+  }
+
+  @override
+  void dispose() {
+    sharedLink.removeListener(_onShare);
+    super.dispose();
+  }
+
+  // A link was shared into the app: show the Get tab.
+  void _onShare() {
+    if (mounted && _tab != 0) setState(() => _tab = 0);
+  }
 
   @override
   Widget build(BuildContext context) {

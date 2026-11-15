@@ -18,7 +18,7 @@ class DownloadTask extends ChangeNotifier {
 
   final String id;
   final String title;
-  final String label;
+  String label;
   final String videoId;
   final String? thumbnailUrl;
   final String? channel;
@@ -36,7 +36,7 @@ class DownloadTask extends ChangeNotifier {
   String? note; // extra message when done (e.g. merge fallback)
   int? fileBytes;
   bool cancelRequested = false;
-  Object? retryPayload; // the DownloadRequest, used by "Retry"
+  Object? retryPayload; // DownloadRequest or BatchItem, used by "Retry"
   final List<String> logs = [];
 
   Duration? get eta {
