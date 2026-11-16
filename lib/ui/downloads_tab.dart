@@ -421,7 +421,7 @@ class _TaskCard extends StatelessWidget {
               child: CircularProgressIndicator(strokeWidth: 2),
             ),
             const SizedBox(width: 8),
-            Text('Merging video + audio…', style: tt),
+            Text('Processing…', style: tt),
           ]),
         ]);
       case TaskState.done:

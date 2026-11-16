@@ -4,12 +4,14 @@ import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
 import '../audio_tracks.dart';
 import '../download_manager.dart';
+import '../extras.dart';
 import '../links.dart';
 import '../models.dart';
 import '../presets.dart';
 import '../settings.dart';
 import '../share_intake.dart';
 import '../theme.dart';
+import 'extras_card.dart';
 import 'widgets.dart';
 
 enum Mode { both, videoOnly, audioOnly }
@@ -35,6 +37,8 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
   bool _isShort = false;
   bool _custom = false;
   String? _linkedPlaylistId;
+  Extras _extras = Extras();
+  List<Chapter> _chapters = [];
 
   // playlist
   PlaylistInfo? _playlist;
@@ -122,6 +126,8 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
       _clipLink = null;
       _custom = false;
       _linkedPlaylistId = null;
+      _extras = Extras();
+      _chapters = [];
       _isShort = url.contains('/shorts/');
     });
     try {
@@ -141,6 +147,7 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
           _v = vs.firstOrNull;
           _a = tr?.streams.firstOrNull;
           _linkedPlaylistId = listId;
+          _chapters = parseChapters(info.video.description);
           _mode = settings.defaultPreset == QualityPreset.audio
               ? Mode.audioOnly
               : Mode.both;
@@ -190,12 +197,40 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
     ));
   }
 
-  void _enqueue({VideoOnlyStreamInfo? v, AudioOnlyStreamInfo? a}) {
+  void _enqueue({
+    VideoOnlyStreamInfo? v,
+    AudioOnlyStreamInfo? a,
+    Chapter? chapter,
+    Duration? chapterEnd,
+  }) {
     final info = _info;
     if (info == null || (v == null && a == null)) return;
-    manager.enqueue(DownloadRequest(info.video, videoStream: v, audioStream: a));
+    var trim = _extras.trimFor(info.video.duration);
+    if (chapter != null && chapterEnd != null) {
+      trim = TrimRange(chapter.start, chapterEnd);
+    }
+    manager.enqueue(DownloadRequest(
+      info.video,
+      videoStream: v,
+      audioStream: a,
+      trim: trim,
+      thumbnail: _extras.thumbnail,
+      tags: _extras.tags && v == null,
+      subtitle: _extras.subtitle,
+      chapterTitle: chapter?.title,
+    ));
     if (settings.haptics) HapticFeedback.mediumImpact();
-    _toast('Added to downloads');
+    _toast(chapter == null ? 'Added to downloads' : 'Chapter added to downloads');
+  }
+
+  /// Downloads one chapter with the default quick-download quality.
+  void _downloadChapter(Chapter c, Duration end) {
+    final pick = pickPreset(settings.defaultPreset, _videos, _audios);
+    if (!pick.valid) {
+      _toast('No suitable streams found');
+      return;
+    }
+    _enqueue(v: pick.video, a: pick.audio, chapter: c, chapterEnd: end);
   }
 
   void _downloadPlaylist() {
@@ -420,6 +455,8 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
             Pill('Playlists', icon: Icons.playlist_play),
             Pill('Audio only', icon: Icons.music_note),
             Pill('Shorts', icon: Icons.bolt),
+            Pill('Trim & chapters', icon: Icons.content_cut),
+            Pill('Subtitles', icon: Icons.subtitles_outlined),
             Pill('Share to app', icon: Icons.share),
             Pill('Background', icon: Icons.cloud_download_outlined),
           ],
@@ -517,6 +554,19 @@ class _GetTabState extends State<GetTab> with WidgetsBindingObserver {
                 style: Theme.of(context).textTheme.bodySmall),
             const Icon(Icons.chevron_right),
           ]),
+        ),
+      ExtrasCard(
+        key: ValueKey('extras-${v.id.value}'),
+        extras: _extras,
+        duration: v.duration,
+        loadTracks: () => manager.fetchCaptionTracks(v.id),
+      ),
+      if (_chapters.isNotEmpty && v.duration != null)
+        ChaptersCard(
+          key: ValueKey('chapters-${v.id.value}'),
+          chapters: _chapters,
+          total: v.duration!,
+          onDownload: _downloadChapter,
         ),
       const SectionTitle('Quick download'),
       for (final e in picks.entries)
