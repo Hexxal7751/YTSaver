@@ -6,6 +6,7 @@ import '../download_manager.dart';
 import '../models.dart';
 import '../native.dart';
 import '../open_helper.dart';
+import '../settings.dart';
 import '../theme.dart';
 import 'widgets.dart';
 
@@ -77,6 +78,15 @@ class _DownloadsTabState extends State<DownloadsTab> {
           _Sort.name => a.title.toLowerCase().compareTo(b.title.toLowerCase()),
         });
     return [...active, ...rest];
+  }
+
+  void _showQueue() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => const _QueueSheet(),
+    );
   }
 
   @override
@@ -154,6 +164,7 @@ class _DownloadsTabState extends State<DownloadsTab> {
   }
 
   Widget _filterRow(List<DownloadTask> all, bool hasFinished) {
+    final queued = manager.queuedTasks.length;
     return Row(children: [
       Expanded(
         child: SingleChildScrollView(
@@ -170,6 +181,15 @@ class _DownloadsTabState extends State<DownloadsTab> {
                 ),
               ),
           ]),
+        ),
+      ),
+      Badge(
+        isLabelVisible: queued > 0,
+        label: Text('$queued'),
+        child: IconButton(
+          tooltip: 'Queue',
+          icon: const Icon(Icons.low_priority),
+          onPressed: _showQueue,
         ),
       ),
       IconButton(
@@ -217,6 +237,92 @@ class _DownloadsTabState extends State<DownloadsTab> {
   }
 }
 
+/// Queue: set how many downloads run at once and drag to reorder the rest.
+class _QueueSheet extends StatelessWidget {
+  const _QueueSheet();
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: SizedBox(
+        height: MediaQuery.of(context).size.height * 0.7,
+        child: ListenableBuilder(
+          listenable: Listenable.merge([manager, settings]),
+          builder: (context, _) {
+            final q = manager.queuedTasks;
+            return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('Queue',
+                      style: Theme.of(context).textTheme.headlineSmall),
+                  const SizedBox(height: 12),
+                  Text('Downloads at the same time',
+                      style: Theme.of(context).textTheme.labelLarge),
+                  const SizedBox(height: 8),
+                  Wrap(spacing: 8, children: [
+                    for (final n in const [1, 2, 3, 4])
+                      ChoiceChip(
+                        label: Text('$n'),
+                        selected: settings.maxConcurrent == n,
+                        onSelected: (_) => manager.setMaxConcurrent(n),
+                      ),
+                  ]),
+                  const SizedBox(height: 12),
+                  Text(
+                    q.isEmpty
+                        ? 'Nothing is waiting.'
+                        : 'Drag to reorder. The top one starts next.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ]),
+              ),
+              Expanded(
+                child: q.isEmpty
+                    ? const SizedBox.shrink()
+                    : ReorderableListView.builder(
+                        buildDefaultDragHandles: false,
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        itemCount: q.length,
+                        onReorder: (o, n) {
+                          if (n > o) n -= 1;
+                          manager.moveQueued(o, n);
+                        },
+                        itemBuilder: (c, i) {
+                          final t = q[i];
+                          return ListTile(
+                            key: ValueKey(t.id),
+                            leading: ReorderableDragStartListener(
+                              index: i,
+                              child: const Icon(Icons.drag_handle),
+                            ),
+                            title: Text(t.title,
+                                maxLines: 2, overflow: TextOverflow.ellipsis),
+                            subtitle: Text('#${i + 1} · ${t.label}'),
+                            trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                              IconButton(
+                                tooltip: 'Start now',
+                                icon: const Icon(Icons.play_arrow),
+                                onPressed: () => manager.startNow(t),
+                              ),
+                              IconButton(
+                                tooltip: 'Remove',
+                                icon: const Icon(Icons.close),
+                                onPressed: () => manager.remove(t),
+                              ),
+                            ]),
+                          );
+                        },
+                      ),
+              ),
+            ]);
+          },
+        ),
+      ),
+    );
+  }
+}
+
 /// Banner with active count, total speed and overall progress.
 class _Summary extends StatelessWidget {
   const _Summary();
@@ -234,6 +340,8 @@ class _Summary extends StatelessWidget {
         final tot = active.fold<int>(0, (s, t) => s + t.total);
         final merging = active.every((t) => t.state == TaskState.merging);
         final waiting = active.every((t) => t.state == TaskState.waitingWifi);
+        final paused = active.every((t) => t.state == TaskState.paused);
+        final queued = active.every((t) => t.state == TaskState.queued);
         return Container(
           margin: const EdgeInsets.fromLTRB(16, 4, 16, 8),
           padding: const EdgeInsets.all(16),
@@ -255,11 +363,15 @@ class _Summary extends StatelessWidget {
                 ),
               ),
               Text(
-                  waiting
-                      ? 'Waiting for Wi-Fi'
-                      : merging
-                          ? 'Merging…'
-                          : '${fmtBytes(speed)}/s',
+                  paused
+                      ? 'Paused'
+                      : waiting
+                          ? 'Waiting for Wi-Fi'
+                          : queued
+                              ? 'Waiting…'
+                              : merging
+                                  ? 'Processing…'
+                                  : '${fmtBytes(speed)}/s',
                   style: const TextStyle(
                       color: Colors.white, fontWeight: FontWeight.w600)),
             ]),
@@ -267,7 +379,9 @@ class _Summary extends StatelessWidget {
             ClipRRect(
               borderRadius: BorderRadius.circular(8),
               child: LinearProgressIndicator(
-                value: (tot == 0 || merging || waiting) ? null : rec / tot,
+                value: (tot == 0 || merging || waiting || queued)
+                    ? (paused && tot > 0 ? rec / tot : null)
+                    : rec / tot,
                 minHeight: 7,
                 color: Colors.white,
                 backgroundColor: Colors.white24,
@@ -325,31 +439,35 @@ class _TaskCard extends StatelessWidget {
     Widget? overlay;
     if (t.active) {
       final determinate = t.state == TaskState.downloading;
-      overlay = Container(
-        color: Colors.black54,
-        child: Center(
-          child: t.state == TaskState.waitingWifi
-              ? const Icon(Icons.wifi, color: Colors.white)
-              : SizedBox(
-                  width: 34,
-                  height: 34,
-                  child: Stack(alignment: Alignment.center, children: [
-                    CircularProgressIndicator(
-                      value: determinate ? t.progress : null,
-                      strokeWidth: 3,
-                      color: Colors.white,
-                      backgroundColor: Colors.white24,
-                    ),
-                    if (determinate)
-                      Text('${(t.progress * 100).round()}',
-                          style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 10,
-                              fontWeight: FontWeight.w700)),
-                  ]),
-                ),
-        ),
-      );
+      Widget center;
+      switch (t.state) {
+        case TaskState.waitingWifi:
+          center = const Icon(Icons.wifi, color: Colors.white);
+        case TaskState.queued:
+          center = const Icon(Icons.schedule, color: Colors.white);
+        case TaskState.paused:
+          center = const Icon(Icons.pause, color: Colors.white);
+        default:
+          center = SizedBox(
+            width: 34,
+            height: 34,
+            child: Stack(alignment: Alignment.center, children: [
+              CircularProgressIndicator(
+                value: determinate ? t.progress : null,
+                strokeWidth: 3,
+                color: Colors.white,
+                backgroundColor: Colors.white24,
+              ),
+              if (determinate)
+                Text('${(t.progress * 100).round()}',
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700)),
+            ]),
+          );
+      }
+      overlay = Container(color: Colors.black54, child: Center(child: center));
     }
     return VideoThumb(
       url: t.thumbnailUrl,
@@ -366,7 +484,22 @@ class _TaskCard extends StatelessWidget {
     final tt = Theme.of(context).textTheme.bodySmall;
     switch (t.state) {
       case TaskState.queued:
-        return Text('Waiting to start…', style: tt);
+        {
+          final pos = manager.queuePosition(t);
+          return Row(children: [
+            Icon(Icons.schedule, size: 18, color: cs.primary),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(pos > 0 ? 'Waiting in queue · #$pos' : 'Starting…',
+                  style: tt),
+            ),
+            if (pos > 0)
+              TextButton(
+                onPressed: () => manager.startNow(t),
+                child: const Text('Start now'),
+              ),
+          ]);
+        }
       case TaskState.waitingWifi:
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
@@ -399,14 +532,56 @@ class _TaskCard extends StatelessWidget {
               const Spacer(),
               Text('${fmtBytes(t.speed)}/s',
                   style: tt?.copyWith(fontWeight: FontWeight.w600)),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                tooltip: 'Pause',
+                icon: const Icon(Icons.pause_circle_outline),
+                onPressed: () => manager.pause(t),
+              ),
             ]),
             Text(
               '${fmtBytes(t.received)} / ${fmtBytes(t.total)} · '
               'ETA ${eta == null ? '--' : fmtDuration(eta)}',
               style: tt,
             ),
+            if (t.status != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Row(children: [
+                  Icon(Icons.sync_problem, size: 16, color: cs.tertiary),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(t.status!,
+                        style: tt?.copyWith(color: cs.tertiary)),
+                  ),
+                ]),
+              ),
           ]);
         }
+      case TaskState.paused:
+        return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: LinearProgressIndicator(value: t.progress, minHeight: 7),
+          ),
+          const SizedBox(height: 6),
+          Row(children: [
+            Icon(Icons.pause_circle, size: 18, color: cs.primary),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                'Paused · ${(t.progress * 100).round()}% · '
+                '${fmtBytes(t.received)} / ${fmtBytes(t.total)}',
+                style: tt,
+              ),
+            ),
+            FilledButton.tonalIcon(
+              onPressed: () => manager.resume(t),
+              icon: const Icon(Icons.play_arrow),
+              label: const Text('Resume'),
+            ),
+          ]),
+        ]);
       case TaskState.merging:
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           ClipRRect(
@@ -546,10 +721,7 @@ class _TaskCard extends StatelessWidget {
                   visualDensity: VisualDensity.compact,
                   tooltip: 'Cancel',
                   icon: const Icon(Icons.close),
-                  onPressed: () {
-                    t.cancelRequested = true;
-                    t.touch();
-                  },
+                  onPressed: () => manager.cancel(t),
                 ),
             ]),
             const SizedBox(height: 12),

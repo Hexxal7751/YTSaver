@@ -4,6 +4,7 @@ enum TaskState {
   queued,
   waitingWifi,
   downloading,
+  paused,
   merging,
   done,
   failed,
@@ -42,9 +43,14 @@ class DownloadTask extends ChangeNotifier {
   String? outputPath;
   String? error;
   String? note; // extra message when done (e.g. merge fallback)
+  String? status; // transient message, e.g. "Connection problem - retrying…"
   int? fileBytes;
   bool cancelRequested = false;
+  bool pauseRequested = false;
   bool forceMobile = false; // "use mobile data anyway" while waiting for Wi-Fi
+  bool started = false; // the download has begun (it holds a download slot)
+  int order = 0; // queue position (lower starts first)
+  Future<void> Function()? starter; // begins the download when a slot is free
   Object? retryPayload; // DownloadRequest or BatchItem, used by "Retry"
   final List<String> logs = [];
 
@@ -57,6 +63,7 @@ class DownloadTask extends ChangeNotifier {
       state == TaskState.queued ||
       state == TaskState.waitingWifi ||
       state == TaskState.downloading ||
+      state == TaskState.paused ||
       state == TaskState.merging;
 
   void log(String msg) {
@@ -100,6 +107,7 @@ class DownloadTask extends ChangeNotifier {
     );
     t.state = TaskState.done;
     t.progress = 1;
+    t.started = true;
     t.outputPath = j['path'] as String?;
     t.note = j['note'] as String?;
     t.fileBytes = j['bytes'] as int?;

@@ -17,9 +17,10 @@ class AppSettings extends ChangeNotifier {
   bool watchClipboard = true;
   bool haptics = true;
 
-  // network
+  // network & queue
   bool wifiOnly = false;
   int warnMobileMb = 200; // 0 = never warn
+  int maxConcurrent = 2; // downloads running at the same time (1-4)
 
   // files
   String filenameTemplate = '{title} [{quality}]';
@@ -54,6 +55,7 @@ class AppSettings extends ChangeNotifier {
       haptics = (m['haptics'] as bool?) ?? true;
       wifiOnly = (m['wifiOnly'] as bool?) ?? false;
       warnMobileMb = (m['warnMb'] as int?) ?? 200;
+      maxConcurrent = ((m['maxConcurrent'] as int?) ?? 2).clamp(1, 4);
       filenameTemplate =
           (m['template'] as String?) ?? '{title} [{quality}]';
       videoBase = (m['videoBase'] as String?) ?? 'Movies';
@@ -74,6 +76,7 @@ class AppSettings extends ChangeNotifier {
         'haptics': haptics,
         'wifiOnly': wifiOnly,
         'warnMb': warnMobileMb,
+        'maxConcurrent': maxConcurrent,
         'template': filenameTemplate,
         'videoBase': videoBase,
         'audioBase': audioBase,

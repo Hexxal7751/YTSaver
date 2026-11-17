@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
 /// A part of a video to keep.
@@ -60,25 +62,108 @@ class Chapter {
   final String title;
 }
 
-/// Finds chapter timestamps in a video description ("0:00 Intro").
-/// YouTube chapters must start at 0:00, so anything else is ignored.
-List<Chapter> parseChapters(String description) {
-  final re = RegExp(
-    r'^\s*(?:[-•·▪►▶>*]\s*)?\(?((?:\d{1,2}:)?\d{1,2}:\d{2})\)?\s*[-–—:|]?\s*(.+?)\s*$',
-    multiLine: true,
-  );
-  final found = <Chapter>[];
-  for (final m in re.allMatches(description)) {
-    final t = parseTimeInput(m.group(1)!);
-    final title = (m.group(2) ?? '').trim();
-    if (t == null || title.isEmpty) continue;
-    found.add(Chapter(t, title));
+const _kOpen = '[[ytsaver-chapters]]';
+const _kClose = '[[/ytsaver-chapters]]';
+
+String _clockOf(Duration d) {
+  String two(int n) => n.toString().padLeft(2, '0');
+  final h = d.inHours;
+  return h > 0
+      ? '$h:${two(d.inMinutes % 60)}:${two(d.inSeconds % 60)}'
+      : '${d.inMinutes}:${two(d.inSeconds % 60)}';
+}
+
+/// A text block that [parseChapters] recognises first. Used to hand chapters
+/// found on YouTube's page to the rest of the app through the description.
+String chaptersToBlock(List<Chapter> list) =>
+    '$_kOpen\n${list.map((c) => '${_clockOf(c.start)} ${c.title}').join('\n')}\n$_kClose\n';
+
+final _hasLetter = RegExp(r'[\p{L}\p{N}]', unicode: true);
+
+bool _validChapters(List<Chapter> l, Duration? total) {
+  if (l.length < 2) return false;
+  for (var i = 1; i < l.length; i++) {
+    if (l[i].start <= l[i - 1].start) return false;
   }
-  if (found.length < 2 || found.first.start != Duration.zero) return const [];
-  for (var i = 1; i < found.length; i++) {
-    if (found[i].start <= found[i - 1].start) return const [];
+  if (l.first.start != Duration.zero && l.length < 3) return false;
+  if (total != null && l.last.start >= total) return false;
+  return true;
+}
+
+List<Chapter> _scan(String text, {required bool timeFirst}) {
+  final re = timeFirst
+      ? RegExp(
+          r'^[ \t]*(?:[^\w\s(\[]{1,4}[ \t]*)?[(\[]?((?:\d{1,2}:)?\d{1,2}:\d{2})[)\]]?[ \t]*[-–—:|.]*[ \t]*(.+?)[ \t]*$',
+          multiLine: true)
+      : RegExp(
+          r'^[ \t]*(.+?)[ \t]*[-–—:|(\[][ \t]*((?:\d{1,2}:)?\d{1,2}:\d{2})[)\]]?[ \t]*$',
+          multiLine: true);
+  final out = <Chapter>[];
+  for (final m in re.allMatches(text)) {
+    final timeStr = timeFirst ? m.group(1)! : m.group(2)!;
+    var title = (timeFirst ? m.group(2) : m.group(1)) ?? '';
+    title = title.replaceAll(RegExp(r'^[\s\-–—:|.]+|[\s\-–—:|.]+$'), '').trim();
+    final t = parseTimeInput(timeStr);
+    if (t == null || title.isEmpty || !_hasLetter.hasMatch(title)) continue;
+    out.add(Chapter(t, title));
   }
-  return found;
+  return out;
+}
+
+/// Finds chapters in a video description: "0:00 Intro" or "Intro - 0:00".
+/// Also understands the block added by [chaptersToBlock].
+List<Chapter> parseChapters(String description, {Duration? total}) {
+  final open = description.indexOf(_kOpen);
+  if (open >= 0) {
+    final close = description.indexOf(_kClose, open);
+    if (close > open) {
+      final block = description.substring(open + _kOpen.length, close);
+      final l = _scan(block, timeFirst: true);
+      if (_validChapters(l, total)) return l;
+    }
+  }
+  final text = description.replaceAll('\r', '');
+  var found = _scan(text, timeFirst: true);
+  if (!_validChapters(found, total)) found = _scan(text, timeFirst: false);
+  return _validChapters(found, total) ? found : const <Chapter>[];
+}
+
+/// Reads chapters out of a YouTube watch page (creator or automatic ones).
+List<Chapter> chaptersFromWatchHtml(String html, {Duration? total}) {
+  String dec(String raw) {
+    try {
+      return jsonDecode('"$raw"') as String;
+    } catch (_) {
+      return raw;
+    }
+  }
+
+  const title =
+      r'\{(?:"simpleText":"((?:[^"\\]|\\.)*)"|"runs":\[\{"text":"((?:[^"\\]|\\.)*)"\}\])\}';
+  final byStart = <int, String>{};
+
+  final a = RegExp('"chapterRenderer":\\{"title":$title,"timeRangeStartMillis":(\\d+)');
+  for (final m in a.allMatches(html)) {
+    final t = dec(m.group(1) ?? m.group(2) ?? '').trim();
+    final ms = int.tryParse(m.group(3) ?? '') ?? -1;
+    if (ms >= 0 && t.isNotEmpty) byStart.putIfAbsent(ms, () => t);
+  }
+
+  if (byStart.length < 2) {
+    final b = RegExp(
+        '"macroMarkersListItemRenderer":\\{"title":$title,"timeDescription":\\{"simpleText":"([\\d:]+)"');
+    for (final m in b.allMatches(html)) {
+      final t = dec(m.group(1) ?? m.group(2) ?? '').trim();
+      final d = parseTimeInput(m.group(3) ?? '');
+      if (d != null && t.isNotEmpty) byStart.putIfAbsent(d.inMilliseconds, () => t);
+    }
+  }
+
+  final keys = byStart.keys.toList()..sort();
+  final list = [
+    for (final k in keys) Chapter(Duration(milliseconds: k), byStart[k]!),
+  ];
+  return _validChapters(list, total) ? list : const <Chapter>[];
 }
 
 // --------------------------------------------------------------- subtitles

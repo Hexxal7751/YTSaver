@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
@@ -131,6 +133,7 @@ class _HomePageState extends State<HomePage> {
           ],
         ),
         body: Column(children: [
+          const _RateBanner(),
           ValueListenableBuilder<String?>(
             valueListenable: Bg.initError,
             builder: (context, err, _) {
@@ -182,6 +185,64 @@ class _HomePageState extends State<HomePage> {
           },
         ),
       ),
+    );
+  }
+}
+
+/// Shown while new YouTube lookups are paused after a confirmed rate limit.
+class _RateBanner extends StatefulWidget {
+  const _RateBanner();
+  @override
+  State<_RateBanner> createState() => _RateBannerState();
+}
+
+class _RateBannerState extends State<_RateBanner> {
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted && manager.rateLimitUntil.value != null) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<DateTime?>(
+      valueListenable: manager.rateLimitUntil,
+      builder: (context, until, _) {
+        if (until == null) return const SizedBox.shrink();
+        final left = until.difference(DateTime.now());
+        if (left.isNegative) return const SizedBox.shrink();
+        final cs = Theme.of(context).colorScheme;
+        return Container(
+          width: double.infinity,
+          color: cs.tertiaryContainer,
+          padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+          child: Row(children: [
+            Icon(Icons.hourglass_top, size: 20, color: cs.onTertiaryContainer),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'YouTube is limiting this connection. New lookups are paused '
+                'for ${fmtDuration(left)} so it does not get worse.',
+                style: TextStyle(fontSize: 12, color: cs.onTertiaryContainer),
+              ),
+            ),
+            TextButton(
+              onPressed: manager.clearRateLimit,
+              child: const Text('Try now'),
+            ),
+          ]),
+        );
+      },
     );
   }
 }
